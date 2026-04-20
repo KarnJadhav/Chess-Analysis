@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	background-color: #0f172a; /* bg-slate-900 */
+	color: #e2e8f0; /* text-slate-200 */
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; /* font-sans */
+}
+
+.chess-board {
+	display: grid;
+	grid-template-columns: repeat(8, 1fr);
+	grid-template-rows: repeat(8, 1fr);
+	width: 100%;
+	max-width: 400px;
+	aspect-ratio: 1 / 1;
+	border: 2px solid #333;
+}
+
+.square {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	aspect-ratio: 1 / 1;
+	font-size: clamp(16px, 3vw, 32px);
+	line-height: 1;
+	user-select: none;
+}
+
+.viewer-container {
+	display: flex;
+	gap: 20px;
+	align-items: flex-start;
+}
+
+.board-container {
+	flex: 1;
+	display: flex;
+	justify-content: center;
+}
+
+.info-container {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-width: 0;
+}
+
+.moves-list {
+	max-height: 220px;
+	overflow-y: auto;
+	padding-right: 4px;
+}
+
+.graph {
+	width: 100%;
+	height: 240px;
+	min-height: 240px;
+}
+
+@media (max-width: 768px) {
+	.viewer-container {
+		flex-direction: column;
+		align-items: center;
+	}
+
+	.info-container {
+		width: 100%;
+	}
+
+	.chess-board {
+		max-width: 300px;
+	}
+
+	.graph {
+		height: 200px;
+		min-height: 200px;
+	}
+}
+
+/* --- CSS Variables for Navbar --- */
+/* --- CSS Variables for Navbar --- */
+
+:root,
+[data-theme='light'] {
+	--navbar-height: 70px;
+	--color-primary: #007bff;
+	--color-text: #212529;
+	--color-text-light: #6c757d;
+	--color-background: #ffffff;
+	--color-background-muted: #f8f9fa;
+	--color-border: #dee2e6;
+	--border-radius: 8px;
+	--transition-speed: 0.3s;
+	--shadow-color: rgba(0, 0, 0, 0.05);
+}
+
+[data-theme='dark'] {
+	--color-primary: #0d6efd;
+	--color-text: #e9ecef;
+	--color-text-light: #adb5bd;
+	--color-background: #121212;
+	--color-background-muted: #1e1e1e;
+	--color-border: #343a40;
+	--shadow-color: rgba(255, 255, 255, 0.05);
+}
+
+body {
+	margin: 0;
+	min-height: 100vh;
+	background-color: #0f172a; /* bg-slate-900 */
+	color: #e2e8f0; /* text-slate-200 */
+	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; /* font-sans */
+}
