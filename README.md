@@ -34,3 +34,29 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## Environment Variables
+
+Copy [.env.example](.env.example) to [.env.local](.env.local) and fill in the values before running locally or deploying to Vercel.
+
+Required values:
+
+- `MONGODB_URI`: MongoDB connection string used by auth, uploads, and analysis persistence.
+- `NEXTAUTH_URL`: Base URL for NextAuth callbacks, for example `http://localhost:3000` locally or your Vercel domain in production.
+- `NEXTAUTH_SECRET`: Long random secret used to sign NextAuth tokens and middleware sessions.
+
+Optional Stockfish values:
+
+- `STOCKFISH_MODE`: `native` or `wasm`.
+- `STOCKFISH_PATH`: Path to the native Stockfish binary when using server-side analysis.
+- `NEXT_PUBLIC_STOCKFISH_MODE`: Browser-visible Stockfish mode for the WASM client path.
+- `NEXT_PUBLIC_STOCKFISH_WASM_URL`: URL for the Stockfish WASM bundle.
+
+Recommended Vercel settings:
+
+- Project type: Next.js
+- Build command: `npm run build`
+- Output directory: leave default
+- Environment: add the required variables above in Production, Preview, and Development as needed
+
+See [VERCEL_SETUP.md](VERCEL_SETUP.md) for the exact values and deployment checklist.

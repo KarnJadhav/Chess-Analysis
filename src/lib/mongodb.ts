@@ -13,9 +13,13 @@ declare global {
   var _mongoClientPromise: Promise<MongoClient> | undefined;
 }
 
-// Validate configuration
+// Validate configuration. Do not throw during module import to avoid crashing serverless functions.
 if (!uri) {
-  throw new Error('MONGODB_URI environment variable is not set. Please add it to .env.local or .env');
+  // Create a rejected promise so callsites receive a clear error when they attempt DB access.
+  // This prevents module-level throws that result in 500s with less helpful stack traces.
+  // Consumers should set MONGODB_URI in their environment (e.g., .env.local, Vercel env vars).
+  // eslint-disable-next-line no-console
+  console.warn('MONGODB_URI environment variable is not set. Database operations will fail until it is provided.');
 }
 
 if (process.env.NODE_ENV === 'development') {
@@ -39,6 +43,11 @@ if (process.env.NODE_ENV === 'development') {
       console.error('Failed to connect to MongoDB:', err.message);
       throw err;
     });
+}
+
+// If uri was empty, export a rejected promise to surface the configuration error at call sites.
+if (!uri) {
+  clientPromise = Promise.reject(new Error('MONGODB_URI environment variable is not set')) as Promise<MongoClient>;
 }
 
 export default clientPromise;
