@@ -4,8 +4,10 @@ import CredentialsProvider from 'next-auth/providers/credentials';
 import clientPromise from '@/lib/mongodb';
 import { User as UserModel } from '@/models/User';
 import { compare } from 'bcryptjs';
+import { getAuthSecret } from '@/lib/authSecret';
 
 export const authOptions: AuthOptions = {
+  secret: getAuthSecret(),
   providers: [
     CredentialsProvider({
       name: 'Credentials',
