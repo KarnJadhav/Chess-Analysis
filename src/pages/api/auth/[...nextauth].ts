@@ -19,17 +19,19 @@ export const authOptions: AuthOptions = {
             throw new Error('Email and password required');
           }
 
+          const normalizedEmail = credentials.email.trim().toLowerCase();
+
           const client = await clientPromise;
           const db = client.db();
-          const user = await db.collection<UserModel>('users').findOne({ email: credentials.email.toLowerCase() });
+          const user = await db.collection<UserModel>('users').findOne({ email: normalizedEmail });
 
           if (!user) {
-            throw new Error('Invalid email or password');
+            return null;
           }
 
           const isPasswordValid = await compare(credentials.password, user.passwordHash);
           if (!isPasswordValid) {
-            throw new Error('Invalid email or password');
+            return null;
           }
 
           return { 
@@ -38,8 +40,11 @@ export const authOptions: AuthOptions = {
             email: user.email 
           };
         } catch (err) {
+          if (err instanceof Error && err.message === 'Email and password required') {
+            throw err;
+          }
           console.error('Authorization error:', err);
-          throw new Error(err instanceof Error ? err.message : 'Authorization failed');
+          throw new Error('Authorization failed');
         }
       },
     }),

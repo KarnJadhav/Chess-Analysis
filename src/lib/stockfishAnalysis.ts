@@ -4,304 +4,294 @@ import { existsSync } from 'fs';
 import clientPromise from '@/lib/mongodb';
 import { config } from '@/lib/config';
 import { detectOpeningFromMoves } from '@/lib/openings';
+import {
+  buildReview,
+  type ReviewedMove,
+  type TimelinePoint,
+  type PlayerSummary,
+  type EstimatedRating,
+} from '@/lib/reviewBuilder';
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface AnalysisResult {
   acpl: number;
-  blunders: { move: string, evalDrop: number }[];
-  mistakes: { move: string, evalDrop: number }[];
+  acplWhite: number;
+  acplBlack: number;
+  accuracy: number;
+  accuracyWhite: number;
+  accuracyBlack: number;
+  blunders: MoveAnnotation[];
+  mistakes: MoveAnnotation[];
+  inaccuracies: MoveAnnotation[];
   suggestions: string[];
   analysisComplete: boolean;
   endgameReached: boolean;
-  acplWhite?: number;
-  acplBlack?: number;
-  accuracy?: number;
-  accuracyWhite?: number;
-  accuracyBlack?: number;
-  inaccuracies?: { move: string, evalDrop: number }[];
-  fullMoves?: number;
-  moveEvals: number[];
-  criticalPositions?: {
-    moveNumber: number;
-    playedMove: string;
-    bestMove: string;
-    evalBefore: number;
-    evalAfter: number;
-    evalDrop: number;
-    classification: 'blunder' | 'mistake' | 'inaccuracy';
-    principalVariation?: string;
-  }[];
+  fullMoves: number;
+  moveEvals: number[];       // White-perspective cp after each half-move
+  criticalPositions: CriticalPosition[];
+  reviewedMoves: ReviewedMove[];
+  timeline: TimelinePoint[];
+  playerSummary: PlayerSummary;
+  estimatedRating: EstimatedRating;
+  review: {
+    reviewedMoves: ReviewedMove[];
+    timeline: TimelinePoint[];
+    playerSummary: PlayerSummary;
+    estimatedRating: EstimatedRating;
+  };
 }
 
-interface StockfishSearchResult {
-  evalCp: number;
+interface MoveAnnotation {
+  move: string;
+  evalDrop: number;
+}
+
+interface CriticalPosition {
+  moveNumber: number;        // 1-indexed half-move number
+  playedMove: string;
   bestMove: string;
+  evalBefore: number;        // White-perspective cp before move
+  evalAfter: number;         // White-perspective cp after move
+  evalDrop: number;          // always positive; magnitude of the error
+  side: 'white' | 'black';
+  classification: 'blunder' | 'mistake' | 'inaccuracy';
   principalVariation?: string;
 }
 
-interface StockfishEngine {
-  search: (fen: string) => Promise<StockfishSearchResult>;
+interface SearchResult {
+  evalCp: number;            // raw Stockfish score (side-to-move perspective)
+  bestMove: string;
+  pv?: string;
+}
+
+interface Engine {
+  search: (fen: string) => Promise<SearchResult>;
   close: () => void;
 }
 
-function isEngineUnavailableError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const message = err.message.toLowerCase();
-  return message.includes('enoent') || message.includes('not found') || message.includes('failed to spawn stockfish');
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function mateToCp(mateIn: number): number {
+  return Math.sign(mateIn) * (100_000 - Math.abs(mateIn) * 1_000);
 }
 
-function createEngineUnavailableError(originalErr: unknown): Error {
-  const detail = originalErr instanceof Error ? originalErr.message : String(originalErr);
-  return new Error(
-    `Stockfish engine is not available. Set STOCKFISH_PATH to a valid executable path (for example: C:\\stockfish\\stockfish-windows-x86-64-avx2.exe) or install stockfish in PATH. Original error: ${detail}`
-  );
-}
-
-function normalizeMateToCp(mateScore: number): number {
-  const sign = mateScore >= 0 ? 1 : -1;
-  const distance = Math.abs(mateScore);
-  return sign * (100000 - distance * 1000);
-}
-
-function parseUciScore(line: string): number | null {
-  const cpMatch = line.match(/score cp (-?\d+)/);
-  if (cpMatch) {
-    return parseInt(cpMatch[1], 10);
-  }
-
-  const mateMatch = line.match(/score mate (-?\d+)/);
-  if (mateMatch) {
-    return normalizeMateToCp(parseInt(mateMatch[1], 10));
-  }
-
+function parseScore(line: string): number | null {
+  const cp = line.match(/score cp (-?\d+)/);
+  if (cp) return parseInt(cp[1], 10);
+  const mate = line.match(/score mate (-?\d+)/);
+  if (mate) return mateToCp(parseInt(mate[1], 10));
   return null;
 }
 
-async function createStockfishEngine(): Promise<StockfishEngine> {
-  const stockfishPath = config.stockfish.path;
+/**
+ * Convert a Stockfish eval (always from side-to-move perspective) to an
+ * absolute White-perspective score.
+ *
+ * Stockfish always reports: positive = good for the side about to move.
+ * After White moves it is Black's turn → raw score is Black-centric.
+ * We need every number on one axis (positive = White ahead) so a drop
+ * always means White lost ground.
+ */
+function toWhite(evalCp: number, turn: 'w' | 'b'): number {
+  return turn === 'w' ? evalCp : -evalCp;
+}
 
-  if ((stockfishPath.includes('/') || stockfishPath.includes('\\')) && !existsSync(stockfishPath)) {
-    throw new Error(`Stockfish executable not found at: ${stockfishPath}`);
+/**
+ * Accuracy from average centipawn loss.
+ * Uses the same exponential model as Chess.com / Lichess.
+ */
+function accuracyFromACPL(avgLossCp: number): number {
+  const raw = 103.1668 * Math.exp(-0.04354 * avgLossCp) - 3.1669;
+  return Math.max(0, Math.min(100, Math.round(raw)));
+}
+
+function isSpawnError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const m = err.message.toLowerCase();
+  return m.includes('enoent') || m.includes('not found') || m.includes('failed to spawn');
+}
+
+// ─── Engine factory ───────────────────────────────────────────────────────────
+
+/**
+ * Creates ONE long-lived Stockfish process and wraps it in a promise-based
+ * serial job queue.  Only one `go` command is in-flight at a time; subsequent
+ * calls are queued and dispatched as each `bestmove` arrives.
+ *
+ * This is the correct architecture: spawning a new process per position causes
+ * timeouts on long games and defeats UCI's design purpose.
+ */
+async function createEngine(): Promise<Engine> {
+  const sfPath = config.stockfish.path;
+
+  if ((sfPath.includes('/') || sfPath.includes('\\')) && !existsSync(sfPath)) {
+    throw new Error(`Stockfish not found at: ${sfPath}`);
   }
 
-  let stockfish: ReturnType<typeof spawn>;
+  let proc: ReturnType<typeof spawn>;
   try {
-    stockfish = spawn(stockfishPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
-  } catch (spawnErr) {
-    const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
-    throw new Error(`Failed to spawn Stockfish: ${msg}`);
+    proc = spawn(sfPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+  } catch (e) {
+    throw new Error(`Failed to spawn Stockfish: ${e instanceof Error ? e.message : e}`);
   }
 
-  let buffer = '';
-  let ready = false;
+  let buf = '';
   let closed = false;
+  let engineReady = false;
 
-  type QueueItem = {
+  interface Job {
     fen: string;
-    resolve: (value: StockfishSearchResult) => void;
-    reject: (reason?: unknown) => void;
-  };
+    resolve: (r: SearchResult) => void;
+    reject: (e: unknown) => void;
+  }
 
-  let current:
-    | {
-        resolve: QueueItem['resolve'];
-        reject: QueueItem['reject'];
-        timer: NodeJS.Timeout;
-        lastEval: number;
-        bestMove: string;
-        principalVariation?: string;
-      }
-    | null = null;
+  interface Active {
+    job: Job;
+    timer: NodeJS.Timeout;
+    lastEval: number;
+    bestMove: string;
+    pv?: string;
+  }
 
-  const queue: QueueItem[] = [];
+  const queue: Job[] = [];
+  let active: Active | null = null;
 
-  let resolveReady: (() => void) | null = null;
-  let rejectReady: ((reason?: unknown) => void) | null = null;
+  let onReady: (() => void) | null = null;
+  let onReadyErr: ((e: unknown) => void) | null = null;
+  const readyPromise = new Promise<void>((res, rej) => { onReady = res; onReadyErr = rej; });
 
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-
-  const readyTimeout = setTimeout(() => {
-    rejectReady?.(new Error(`Stockfish engine startup timeout (${config.stockfish.timeout}ms)`));
+  const startupTimeout = setTimeout(() => {
+    onReadyErr?.(new Error('Stockfish startup timeout'));
   }, config.stockfish.timeout);
 
   const failAll = (err: Error) => {
     if (closed) return;
     closed = true;
-    clearTimeout(readyTimeout);
-
-    if (!ready) {
-      rejectReady?.(err);
-    }
-
-    if (current) {
-      clearTimeout(current.timer);
-      current.reject(err);
-      current = null;
-    }
-
-    while (queue.length > 0) {
-      const item = queue.shift();
-      item?.reject(err);
-    }
+    clearTimeout(startupTimeout);
+    if (!engineReady) onReadyErr?.(err);
+    if (active) { clearTimeout(active.timer); active.job.reject(err); active = null; }
+    for (const job of queue) job.reject(err);
+    queue.length = 0;
   };
 
   const pump = () => {
-    if (!ready || closed || current || queue.length === 0) {
-      return;
-    }
-
-    const next = queue.shift();
-    if (!next) return;
+    if (!engineReady || closed || active || queue.length === 0) return;
+    const job = queue.shift();
+    if (!job) return;
 
     const timer = setTimeout(() => {
-      if (!current) return;
-      const timeoutErr = new Error(`Stockfish timeout after ${config.stockfish.timeout}ms for FEN: ${next.fen}`);
-      current.reject(timeoutErr);
-      current = null;
+      if (!active) return;
+      const err = new Error(`Stockfish search timeout for FEN: ${job.fen}`);
+      active.job.reject(err);
+      active = null;
       pump();
     }, config.stockfish.timeout);
 
-    current = {
-      resolve: next.resolve,
-      reject: next.reject,
-      timer,
-      lastEval: 0,
-      bestMove: '(none)',
-    };
+    active = { job, timer, lastEval: 0, bestMove: '(none)' };
 
     try {
-      stockfish.stdin?.write(`position fen ${next.fen}\n`);
-      stockfish.stdin?.write(`go depth ${config.stockfish.depth}\n`);
-    } catch (err) {
+      proc.stdin?.write(`position fen ${job.fen}\n`);
+      proc.stdin?.write(`go depth ${config.stockfish.depth}\n`);
+    } catch (e) {
       clearTimeout(timer);
-      current = null;
-      const msg = err instanceof Error ? err.message : String(err);
-      next.reject(new Error(`Failed to write search command to Stockfish: ${msg}`));
+      active = null;
+      job.reject(new Error(`Stockfish write error: ${e instanceof Error ? e.message : e}`));
       pump();
     }
   };
 
-  stockfish.on('error', (err) => {
-    failAll(new Error(`Stockfish process error: ${err.message}`));
-  });
+  proc.on('error', (e) => failAll(new Error(`Stockfish process error: ${e.message}`)));
+  proc.on('exit', (code) => { if (!closed) failAll(new Error(`Stockfish exited (code ${code})`)); });
 
-  stockfish.on('exit', (code) => {
-    if (!closed) {
-      failAll(new Error(`Stockfish exited unexpectedly with code ${code}`));
-    }
-  });
+  proc.stdout?.on('data', (chunk: Buffer) => {
+    buf += chunk.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop() ?? '';
 
-  stockfish.stdout?.on('data', (data) => {
-    buffer += data.toString();
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
 
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+      if (line === 'uciok')   { proc.stdin?.write('isready\n'); continue; }
 
-      if (trimmed === 'uciok') {
-        stockfish.stdin?.write('isready\n');
-        continue;
-      }
-
-      if (trimmed === 'readyok') {
-        if (!ready) {
-          ready = true;
-          clearTimeout(readyTimeout);
-          resolveReady?.();
+      if (line === 'readyok') {
+        if (!engineReady) {
+          engineReady = true;
+          clearTimeout(startupTimeout);
+          onReady?.();
           pump();
         }
         continue;
       }
 
-      if (!current) {
+      if (!active) continue;
+
+      if (line.startsWith('info') && line.includes(' score ')) {
+        const score = parseScore(line);
+        if (score !== null) active.lastEval = score;
+        const pv = line.match(/\spv\s(.+)$/);
+        if (pv) active.pv = pv[1].trim();
         continue;
       }
 
-      if (trimmed.startsWith('info') && trimmed.includes(' score ')) {
-        const score = parseUciScore(trimmed);
-        if (score !== null) {
-          current.lastEval = score;
-        }
-
-        const pvMatch = trimmed.match(/\spv\s(.+)$/);
-        if (pvMatch) {
-          current.principalVariation = pvMatch[1]?.trim();
-        }
-        continue;
-      }
-
-      if (trimmed.startsWith('bestmove')) {
-        const parts = trimmed.split(/\s+/);
-        current.bestMove = parts[1] || '(none)';
-
-        const result: StockfishSearchResult = {
-          evalCp: current.lastEval,
-          bestMove: current.bestMove,
-          principalVariation: current.principalVariation,
-        };
-
-        clearTimeout(current.timer);
-        current.resolve(result);
-        current = null;
+      if (line.startsWith('bestmove')) {
+        active.bestMove = line.split(/\s+/)[1] ?? '(none)';
+        clearTimeout(active.timer);
+        active.job.resolve({ evalCp: active.lastEval, bestMove: active.bestMove, pv: active.pv });
+        active = null;
         pump();
       }
     }
   });
 
-  stockfish.stderr?.on('data', (data) => {
-    const msg = data.toString().trim();
-    if (msg) {
-      console.warn(`Stockfish stderr: ${msg}`);
-    }
+  proc.stderr?.on('data', (d: Buffer) => {
+    const msg = d.toString().trim();
+    if (msg) console.warn('[Stockfish stderr]', msg);
   });
 
-  try {
-    stockfish.stdin?.write('uci\n');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    failAll(new Error(`Failed to write to Stockfish stdin: ${msg}`));
-  }
-
+  proc.stdin?.write('uci\n');
   await readyPromise;
 
   return {
-    search: (fen: string) =>
-      new Promise<StockfishSearchResult>((resolve, reject) => {
-        if (closed) {
-          reject(new Error('Stockfish engine is closed'));
-          return;
-        }
-
-        queue.push({ fen, resolve, reject });
-        pump();
-      }),
+    search: (fen) => new Promise<SearchResult>((resolve, reject) => {
+      if (closed) { reject(new Error('Engine is closed')); return; }
+      queue.push({ fen, resolve, reject });
+      pump();
+    }),
     close: () => {
       if (closed) return;
       closed = true;
-      clearTimeout(readyTimeout);
-      try {
-        stockfish.stdin?.write('quit\n');
-      } catch {
-        // no-op
-      }
-      stockfish.kill();
+      try { proc.stdin?.write('quit\n'); } catch { /* ok */ }
+      proc.kill();
     },
   };
 }
 
-function toWhitePerspective(evalCp: number, turn: 'w' | 'b'): number {
-  return turn === 'w' ? evalCp : -evalCp;
+// ─── Drop logic ───────────────────────────────────────────────────────────────
+
+/**
+ * How many centipawns did the moving side throw away?
+ *
+ * All evals are White-perspective (positive = White ahead).
+ *
+ *   White just moved:
+ *     Well played  → evalAfter >= evalBefore  (White maintained/improved)
+ *     Poorly played → evalAfter < evalBefore  (White lost ground)
+ *     drop = max(0, evalBefore − evalAfter)
+ *
+ *   Black just moved:
+ *     Well played  → evalAfter <= evalBefore  (eval fell = Black improved)
+ *     Poorly played → evalAfter > evalBefore  (eval rose = Black lost ground)
+ *     drop = max(0, evalAfter − evalBefore)
+ */
+function computeDrop(evalBefore: number, evalAfter: number, isWhiteMove: boolean): number {
+  return isWhiteMove
+    ? Math.max(0, evalBefore - evalAfter)
+    : Math.max(0, evalAfter - evalBefore);
 }
 
-function accuracyFromAvgLoss(avgLossCp: number): number {
-  // 10cp average loss ~= 1 accuracy point.
-  const raw = 100 - (avgLossCp / 10);
-  return Math.max(0, Math.min(100, Math.round(raw)));
-}
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 export async function analyzePGNAndSave({
   pgn,
@@ -311,177 +301,181 @@ export async function analyzePGNAndSave({
   pgn: string;
   userId: string;
   gameId: string;
-}) {
+}): Promise<AnalysisResult | null> {
   if (Array.isArray(pgn)) pgn = (pgn as string[]).join(' ');
-  if (typeof pgn !== 'string') throw new Error('Invalid PGN format: must be a string');
+  if (typeof pgn !== 'string') throw new Error('PGN must be a string');
 
   const games = pgn.split(/\n(?=\[Event )/).map(g => g.trim()).filter(Boolean);
   const allResults: AnalysisResult[] = [];
-  let fatalAnalysisError: Error | null = null;
-  let latestDetectedOpening = 'Unknown Opening';
+  let detectedOpening = 'Unknown Opening';
 
   for (const gamePgn of games) {
+    let engine: Engine | null = null;
+
     try {
       console.log(`[Analysis] Parsing PGN (${gamePgn.length} chars)...`);
       const chess = new Chess();
       chess.loadPgn(gamePgn);
-      const moves = chess.history();
-      latestDetectedOpening = detectOpeningFromMoves(moves);
-      console.log(`[Analysis] ${moves.length} half-moves to evaluate`);
-      const engine = await createStockfishEngine();
+      const verboseMoves = chess.history({ verbose: true });
+      const movesSan = verboseMoves.map((m) => m.san);
+      const moveUcis = verboseMoves.map((m) => `${m.from}${m.to}${m.promotion ?? ''}`);
+      console.log(`[Analysis] ${movesSan.length} half-moves to evaluate`);
+      detectedOpening = detectOpeningFromMoves(movesSan);
 
-      const blunders: AnalysisResult['blunders'] = [];
-      const mistakes: AnalysisResult['mistakes'] = [];
-      const inaccuracies: NonNullable<AnalysisResult['inaccuracies']> = [];
-      const suggestions: string[] = [];
-      const moveEvals: number[] = [];
-      const criticalPositions: NonNullable<AnalysisResult['criticalPositions']> = [];
-
-      let endgameReached = false;
-      let whiteLossSum = 0;
-      let blackLossSum = 0;
-
-      const evalsBefore: number[] = [];
-      const bestMoves: string[] = [];
-      const pvs: (string | undefined)[] = [];
+      // ── Build position list ──────────────────────────────────────────────
+      // fens[i]      = position before move i     (i = 0..N-1)
+      // fens[N]      = final position
+      // sideAtFen[i] = side to move at fens[i]
+      //
+      // We evaluate ALL N+1 positions so that:
+      //   evalsBefore[i] = evalsWhite[i]
+      //   evalsAfter[i]  = evalsWhite[i+1]
+      // No position is evaluated twice.
 
       const fens: string[] = [];
-      const sideToMoveAtFen: ('w' | 'b')[] = [];
+      const sideAtFen: ('w' | 'b')[] = [];
       {
         const walker = new Chess();
         fens.push(walker.fen());
-        sideToMoveAtFen.push(walker.turn());
-        for (const move of moves) {
-          walker.move(move);
+        sideAtFen.push(walker.turn());
+        for (const move of verboseMoves) {
+          walker.move({ from: move.from, to: move.to, promotion: move.promotion });
           fens.push(walker.fen());
-          sideToMoveAtFen.push(walker.turn());
+          sideAtFen.push(walker.turn());
         }
       }
 
-      try {
-        for (let i = 0; i < moves.length; i++) {
-          let result: StockfishSearchResult;
-          try {
-            result = await engine.search(fens[i]);
-          } catch (err) {
-            if (isEngineUnavailableError(err)) {
-              throw createEngineUnavailableError(err);
-            }
-            console.warn(`[Analysis] Stockfish failed on move ${i + 1} (${moves[i]}):`, err);
-            const lastEval = evalsBefore.length > 0 ? evalsBefore[i - 1] : 0;
-            const fallbackRaw = sideToMoveAtFen[i] === 'w' ? lastEval : -lastEval;
-            result = {
-              evalCp: fallbackRaw,
-              bestMove: '(none)',
-            };
-          }
+      // ── Evaluate with single engine instance ─────────────────────────────
+      engine = await createEngine();
 
-          const evalWhite = toWhitePerspective(result.evalCp, sideToMoveAtFen[i]);
-          evalsBefore.push(evalWhite);
-          bestMoves.push(result.bestMove);
-          pvs.push(result.principalVariation);
-          console.log(`[Analysis] Move ${i + 1}: Eval ${evalWhite}`);
-        }
-      } finally {
-        engine.close();
-      }
+      const evalsWhite: number[] = [];   // length = moves.length + 1
+      const bestMoves: string[] = [];    // length = movesSan.length (only pre-move positions)
+      const pvs: (string | undefined)[] = [];
 
-      let evalAfterLast = 0;
-      try {
-        const finalEngine = await createStockfishEngine();
+      for (let i = 0; i <= movesSan.length; i++) {
+        let result: SearchResult;
         try {
-          const lastResult = await finalEngine.search(fens[moves.length]);
-          evalAfterLast = toWhitePerspective(lastResult.evalCp, sideToMoveAtFen[moves.length]);
-        } finally {
-          finalEngine.close();
-        }
-      } catch (err) {
-        if (isEngineUnavailableError(err)) {
-          throw createEngineUnavailableError(err);
-        }
-        console.warn('[Analysis] Stockfish failed on final position:', err);
-        evalAfterLast = evalsBefore[moves.length - 1] ?? 0;
-      }
-
-      const evalsAfter: number[] = [...evalsBefore.slice(1), evalAfterLast];
-
-      const { blunderThreshold, mistakeThreshold, inaccuracyThreshold } = config.analysis;
-
-      for (let i = 0; i < moves.length; i++) {
-        const evalBefore = evalsBefore[i];
-        const evalAfter = evalsAfter[i];
-        const isWhiteMove = i % 2 === 0;
-
-        moveEvals.push(evalAfter);
-
-        let drop = 0;
-        if (isWhiteMove) {
-          drop = Math.max(0, evalBefore - evalAfter);
-          if (drop > 0) whiteLossSum += drop;
-        } else {
-          drop = Math.max(0, evalAfter - evalBefore);
-          if (drop > 0) blackLossSum += drop;
+          result = await engine.search(fens[i]);
+        } catch (err) {
+          if (isSpawnError(err)) throw err;
+          console.warn(`[Analysis] Engine failed on position ${i}:`, err);
+          const lastWhite = evalsWhite.at(-1) ?? 0;
+          result = {
+            evalCp: sideAtFen[i] === 'w' ? lastWhite : -lastWhite,
+            bestMove: '(none)',
+          };
         }
 
-        let classification: 'blunder' | 'mistake' | 'inaccuracy' | null = null;
-        if (drop >= blunderThreshold) {
-          blunders.push({ move: moves[i], evalDrop: drop });
-          classification = 'blunder';
-        } else if (drop >= mistakeThreshold) {
-          mistakes.push({ move: moves[i], evalDrop: drop });
-          classification = 'mistake';
-        } else if (drop >= inaccuracyThreshold) {
-          inaccuracies.push({ move: moves[i], evalDrop: drop });
-          classification = 'inaccuracy';
-        }
+        evalsWhite.push(toWhite(result.evalCp, sideAtFen[i]));
 
-        if (classification) {
-          criticalPositions.push({
-            moveNumber: i + 1,
-            playedMove: moves[i],
-            bestMove: bestMoves[i],
-            evalBefore,
-            evalAfter,
-            evalDrop: drop,
-            classification,
-            principalVariation: pvs[i],
-          });
+        // bestMove and pv are only meaningful pre-move (positions 0..N-1)
+        if (i < movesSan.length) {
+          bestMoves.push(result.bestMove);
+          pvs.push(result.pv);
+          console.log(`[Analysis] Move ${i + 1} (${movesSan[i]}): before=${evalsWhite.at(-1)}`);
         }
       }
 
-      {
-        const checker = new Chess();
-        checker.loadPgn(gamePgn);
-        endgameReached = checker.isCheckmate() || checker.isStalemate() || checker.isInsufficientMaterial();
+      engine.close();
+      engine = null;
+
+      // ── Classify ─────────────────────────────────────────────────────────
+      let whiteLossSum = 0;
+      let blackLossSum = 0;
+
+      for (let i = 0; i < movesSan.length; i++) {
+        const evalBefore = evalsWhite[i];
+        const evalAfter = evalsWhite[i + 1];
+        const isWhiteMove = (i % 2) === 0;   // move 0 = White's e4, move 1 = Black's c5, …
+
+        const drop = computeDrop(evalBefore, evalAfter, isWhiteMove);
+        if (isWhiteMove) whiteLossSum += drop;
+        else blackLossSum += drop;
       }
 
-      const whiteMoves = Math.ceil(moves.length / 2);
-      const blackMoves = Math.floor(moves.length / 2);
-      const acplWhite = whiteMoves ? Math.round(whiteLossSum / whiteMoves) : 0;
-      const acplBlack = blackMoves ? Math.round(blackLossSum / blackMoves) : 0;
-      const acpl = Math.round((acplWhite + acplBlack) / 2);
-      const avgLossOverall = moves.length ? (whiteLossSum + blackLossSum) / moves.length : 0;
-      const accuracy = accuracyFromAvgLoss(avgLossOverall);
-      const accuracyWhite = accuracyFromAvgLoss(whiteMoves ? whiteLossSum / whiteMoves : 0);
-      const accuracyBlack = accuracyFromAvgLoss(blackMoves ? blackLossSum / blackMoves : 0);
-      const fullMoves = Math.ceil(moves.length / 2);
+      // ── Metrics ───────────────────────────────────────────────────────────
+      const whiteMoveCount = Math.ceil(movesSan.length / 2);
+      const blackMoveCount = Math.floor(movesSan.length / 2);
+
+      const acplWhite = whiteMoveCount ? Math.round(whiteLossSum / whiteMoveCount) : 0;
+      const acplBlack = blackMoveCount ? Math.round(blackLossSum / blackMoveCount) : 0;
+      const acpl = movesSan.length ? Math.round((whiteLossSum + blackLossSum) / movesSan.length) : 0;
+
+      const reviewData = buildReview({
+        movesSan,
+        moveUcis,
+        fens,
+        evalsWhite,
+        bestMoves,
+        openingKnown: detectedOpening !== 'Unknown Opening',
+        acplWhite,
+        acplBlack,
+      });
+
+      const moveEvals = reviewData.timeline.map((point) => point.eval);
+      const blunders = reviewData.reviewedMoves
+        .filter((m) => m.classification === 'blunder')
+        .map((m) => ({ move: m.san, evalDrop: m.evalDrop }));
+      const mistakes = reviewData.reviewedMoves
+        .filter((m) => m.classification === 'mistake')
+        .map((m) => ({ move: m.san, evalDrop: m.evalDrop }));
+      const inaccuracies = reviewData.reviewedMoves
+        .filter((m) => m.classification === 'inaccuracy')
+        .map((m) => ({ move: m.san, evalDrop: m.evalDrop }));
+      const criticalPositions: CriticalPosition[] = reviewData.reviewedMoves
+        .filter((m) => m.classification === 'blunder' || m.classification === 'mistake' || m.classification === 'inaccuracy')
+        .map((m) => ({
+          moveNumber: m.moveNumber,
+          playedMove: m.san,
+          bestMove: m.bestMove,
+          evalBefore: m.evalBefore,
+          evalAfter: m.evalAfter,
+          evalDrop: m.evalDrop,
+          side: m.side,
+          classification: m.classification as 'blunder' | 'mistake' | 'inaccuracy',
+          principalVariation: pvs[m.moveNumber - 1],
+        }));
+
+      const accuracyWhite = reviewData.playerSummary.white.accuracy;
+      const accuracyBlack = reviewData.playerSummary.black.accuracy;
+      const accuracy = accuracyFromACPL(acpl);
+      const fullMoves = whiteMoveCount;
+
+      // ── Endgame ───────────────────────────────────────────────────────────
+      const finalChess = new Chess();
+      finalChess.loadPgn(gamePgn);
+      const endgameReached =
+        finalChess.isCheckmate() ||
+        finalChess.isStalemate() ||
+        finalChess.isInsufficientMaterial() ||
+        finalChess.isDraw();
 
       console.log(
         `[Analysis] Done: ACPL=${acpl} (W:${acplWhite} B:${acplBlack}) ` +
         `Accuracy=${accuracy}% (W:${accuracyWhite}% B:${accuracyBlack}%) ` +
         `Blunders=${blunders.length} Mistakes=${mistakes.length} ` +
-        `Inaccuracies=${inaccuracies.length} Half-moves=${moves.length}`
+        `Inaccuracies=${inaccuracies.length} Half-moves=${movesSan.length}`
       );
 
-      if (acpl > 120) suggestions.push('Practice accuracy with slow games.');
-      if (acplWhite > 150) suggestions.push('White side: work on calculation and avoiding oversights.');
-      if (acplBlack > 150) suggestions.push('Black side: work on calculation and avoiding oversights.');
-      if (blunders.length > 3) suggestions.push('Do tactics training to reduce blunders.');
-      if (mistakes.length > 5) suggestions.push('Study opening principles and middlegame strategies.');
-      if (endgameReached) suggestions.push('Review endgame strategies and techniques.');
+      // ── Suggestions ───────────────────────────────────────────────────────
+      const suggestions: string[] = [];
+      if (acplWhite > 100) suggestions.push('White: reduce errors with slow, deliberate calculation.');
+      if (acplBlack > 100) suggestions.push('Black: reduce errors with slow, deliberate calculation.');
+      if (blunders.length > 2) suggestions.push('Tactics training needed - too many blunders.');
+      if (mistakes.length > 4) suggestions.push('Study middlegame patterns to reduce mistakes.');
+      if (endgameReached) suggestions.push('Review endgame theory and technique.');
       if (criticalPositions.length > 0) {
-        suggestions.push(`Review ${criticalPositions.length} critical position(s) where better moves were available.`);
+        const wCrit = criticalPositions.filter(p => p.side === 'white').length;
+        const bCrit = criticalPositions.filter(p => p.side === 'black').length;
+        suggestions.push(`Review ${wCrit} critical White move(s) and ${bCrit} critical Black move(s).`);
       }
+
+      const review = {
+        reviewedMoves: reviewData.reviewedMoves,
+        timeline: reviewData.timeline,
+        playerSummary: reviewData.playerSummary,
+        estimatedRating: reviewData.estimatedRating,
+      };
 
       allResults.push({
         acpl,
@@ -499,49 +493,51 @@ export async function analyzePGNAndSave({
         fullMoves,
         moveEvals,
         criticalPositions,
+        reviewedMoves: reviewData.reviewedMoves,
+        timeline: reviewData.timeline,
+        playerSummary: reviewData.playerSummary,
+        estimatedRating: reviewData.estimatedRating,
+        review,
       });
+
     } catch (err) {
-      console.error('[Analysis] Error analyzing game:', err);
-      if (isEngineUnavailableError(err) || (err instanceof Error && err.message.includes('Stockfish engine is not available'))) {
-        fatalAnalysisError = err instanceof Error ? err : new Error(String(err));
-        break;
-      }
+      engine?.close();
+      engine = null;
+      console.error('[Analysis] Fatal error:', err);
+      if (isSpawnError(err)) throw err;
       continue;
     }
   }
 
   if (allResults.length === 0) {
-    if (fatalAnalysisError) {
-      throw fatalAnalysisError;
-    }
-    console.warn('[Analysis] No results generated for gameId:', gameId);
+    console.warn('[Analysis] No results for gameId:', gameId);
     return null;
   }
 
-  const analysisData = allResults[allResults.length - 1];
+  // ── Persist ───────────────────────────────────────────────────────────────
+  const result = allResults.at(-1);
+  if (!result) {
+    console.warn('[Analysis] No final result object for gameId:', gameId);
+    return null;
+  }
   const client = await clientPromise;
   const db = client.db();
   const { ObjectId } = await import('mongodb');
 
-  const updateFields: Record<string, unknown> = {
-    analysis: analysisData,
+  const update: Record<string, unknown> = {
+    analysis: result,
     analysisComplete: true,
-    endgameReached: analysisData.endgameReached,
+    endgameReached: result.endgameReached,
   };
-
-  if (latestDetectedOpening && latestDetectedOpening !== 'Unknown Opening') {
-    updateFields.opening = latestDetectedOpening;
-  }
+  if (detectedOpening !== 'Unknown Opening') update.opening = detectedOpening;
 
   await db.collection('games').updateOne(
     { _id: new ObjectId(gameId), userId },
-    {
-      $set: updateFields,
-    }
+    { $set: update }
   );
 
-  console.log('[Analysis] Saved to MongoDB for gameId:', gameId);
-  return analysisData;
+  console.log('[Analysis] Saved to MongoDB:', gameId);
+  return result;
 }
 
 

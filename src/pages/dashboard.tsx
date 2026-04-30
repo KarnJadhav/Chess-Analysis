@@ -17,10 +17,96 @@ import {
 
 type SelectedGameAnalysis = {
   moveEvals?: number[];
+  accuracyWhite?: number;
+  accuracyBlack?: number;
+  timeline?: {
+    move: number;
+    eval: number;
+    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+  }[];
   criticalPositions?: {
     moveNumber: number;
     classification?: 'blunder' | 'mistake' | 'inaccuracy' | string;
   }[];
+  reviewedMoves?: {
+    moveNumber: number;
+    san: string;
+    bestMove: string;
+    evalBefore: number;
+    evalAfter: number;
+    evalDrop: number;
+    side: 'white' | 'black';
+    phase: 'opening' | 'middlegame' | 'endgame';
+    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+    comment: string;
+  }[];
+  playerSummary?: {
+    white: {
+      accuracy: number;
+      blunders: number;
+      mistakes: number;
+      inaccuracies: number;
+      bestMoves: number;
+      greatMoves: number;
+      brilliantMoves: number;
+    };
+    black: {
+      accuracy: number;
+      blunders: number;
+      mistakes: number;
+      inaccuracies: number;
+      bestMoves: number;
+      greatMoves: number;
+      brilliantMoves: number;
+    };
+  };
+  estimatedRating?: {
+    white: number;
+    black: number;
+  };
+  review?: {
+    timeline?: {
+      move: number;
+      eval: number;
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+    }[];
+    reviewedMoves?: {
+      moveNumber: number;
+      san: string;
+      bestMove: string;
+      evalBefore: number;
+      evalAfter: number;
+      evalDrop: number;
+      side: 'white' | 'black';
+      phase: 'opening' | 'middlegame' | 'endgame';
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+      comment: string;
+    }[];
+    playerSummary?: {
+      white: {
+        accuracy: number;
+        blunders: number;
+        mistakes: number;
+        inaccuracies: number;
+        bestMoves: number;
+        greatMoves: number;
+        brilliantMoves: number;
+      };
+      black: {
+        accuracy: number;
+        blunders: number;
+        mistakes: number;
+        inaccuracies: number;
+        bestMoves: number;
+        greatMoves: number;
+        brilliantMoves: number;
+      };
+    };
+    estimatedRating?: {
+      white: number;
+      black: number;
+    };
+  };
 };
 
 function normalizeEvalCpToPawns(evalCp: number): number {
@@ -41,6 +127,28 @@ type ViewerMove = {
   from: string;
   to: string;
   san: string;
+};
+
+const classificationColors: Record<string, string> = {
+  brilliant: '#20c997',
+  great: '#198754',
+  best: '#0d6efd',
+  excellent: '#2f80ed',
+  good: '#0dcaf0',
+  inaccuracy: '#ffc107',
+  mistake: '#fd7e14',
+  blunder: '#dc3545',
+};
+
+const classificationIcons: Record<string, string> = {
+  brilliant: '!!',
+  great: '!',
+  best: '✓',
+  excellent: '✓',
+  good: '·',
+  inaccuracy: '?!',
+  mistake: '?',
+  blunder: '??',
 };
 
 export default function Dashboard() {
@@ -191,16 +299,35 @@ export default function Dashboard() {
   const uniqueSuggestions = [...new Set(games.flatMap((g: Game) => (g.analysis as unknown as { suggestions?: string[] })?.suggestions || []))];
 
   const selectedAnalysis = (selectedGame?.analysis as SelectedGameAnalysis | undefined) ?? undefined;
-  const blunderMoveSet = new Set(
-    (selectedAnalysis?.criticalPositions ?? [])
-      .filter((p) => p.classification === 'blunder')
-      .map((p) => p.moveNumber)
-  );
-  const chartData = (selectedAnalysis?.moveEvals ?? []).map((evalScore, index) => ({
-    move: index + 1,
-    eval: normalizeEvalCpToPawns(evalScore),
-    isBlunder: blunderMoveSet.has(index + 1),
-  }));
+  const reviewTimeline = selectedAnalysis?.review?.timeline ?? selectedAnalysis?.timeline ?? [];
+  const reviewedMoves = selectedAnalysis?.review?.reviewedMoves ?? selectedAnalysis?.reviewedMoves ?? [];
+  const playerSummary = selectedAnalysis?.review?.playerSummary ?? selectedAnalysis?.playerSummary;
+  const estimatedRating = selectedAnalysis?.review?.estimatedRating ?? selectedAnalysis?.estimatedRating;
+
+  const chartData = reviewTimeline.length > 0
+    ? reviewTimeline.map((point) => ({
+      move: point.move,
+      eval: normalizeEvalCpToPawns(point.eval),
+      classification: point.classification,
+      dotColor: classificationColors[point.classification] ?? '#0d6efd',
+    }))
+    : (selectedAnalysis?.moveEvals ?? []).map((evalScore, index) => ({
+      move: index + 1,
+      eval: normalizeEvalCpToPawns(evalScore),
+      classification: 'good',
+      dotColor: classificationColors.good,
+    }));
+
+  const activeReviewedMove = moveIndex > 0 ? reviewedMoves[moveIndex - 1] : undefined;
+  const whiteName = session?.user?.name || session?.user?.email || 'White';
+  const blackName = selectedGame?.opponent || 'Black';
+
+  function initialsFromName(name: string): string {
+    const chunks = name.split(/\s+/).filter(Boolean);
+    if (chunks.length === 0) return 'U';
+    if (chunks.length === 1) return chunks[0].slice(0, 1).toUpperCase();
+    return (chunks[0][0] + chunks[1][0]).toUpperCase();
+  }
 
   const boardSquares = (() => {
     if (!selectedGame) {
@@ -487,6 +614,40 @@ export default function Dashboard() {
                             <div className="mb-2 fw-semibold">Date: {selectedGame.date ? new Date(selectedGame.date).toLocaleDateString() : ''}</div>
                           </div>
 
+                          <div className="review-summary bg-light rounded-3 p-3 border">
+                            <div className="fw-semibold mb-2">Game Review</div>
+                            <div className="d-flex justify-content-between align-items-center mb-2">
+                              <div className="d-flex align-items-center gap-2">
+                                <div className="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
+                                  {initialsFromName(whiteName)}
+                                </div>
+                                <div>
+                                  <div className="fw-semibold">{whiteName}</div>
+                                  <div className="small text-muted">White</div>
+                                </div>
+                              </div>
+                              <div className="text-end">
+                                <div className="fw-bold text-success">{playerSummary?.white.accuracy ?? selectedAnalysis?.accuracyWhite ?? '-'}%</div>
+                                <div className="small text-muted">Rating: {estimatedRating?.white ?? '-'}</div>
+                              </div>
+                            </div>
+                            <div className="d-flex justify-content-between align-items-center">
+                              <div className="d-flex align-items-center gap-2">
+                                <div className="rounded-circle bg-dark text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
+                                  {initialsFromName(blackName)}
+                                </div>
+                                <div>
+                                  <div className="fw-semibold">{blackName}</div>
+                                  <div className="small text-muted">Black</div>
+                                </div>
+                              </div>
+                              <div className="text-end">
+                                <div className="fw-bold text-success">{playerSummary?.black.accuracy ?? selectedAnalysis?.accuracyBlack ?? '-'}%</div>
+                                <div className="small text-muted">Rating: {estimatedRating?.black ?? '-'}</div>
+                              </div>
+                            </div>
+                          </div>
+
                           <div className="mb-1">
                             <button className="btn btn-outline-secondary me-2" disabled={moveIndex === 0} onClick={() => setMoveIndex(0)}>⏮️</button>
                             <button className="btn btn-outline-secondary me-2" disabled={moveIndex === 0} onClick={() => setMoveIndex(moveIndex - 1)}>◀️</button>
@@ -504,13 +665,41 @@ export default function Dashboard() {
                                 const moveNumber = Math.floor(idx / 2) + 1;
                                 const isWhite = idx % 2 === 0;
                                 const notation = `${isWhite ? moveNumber + '.' : ''} ${move.san}`;
+                                const reviewMove = reviewedMoves[idx];
+                                const icon = classificationIcons[reviewMove?.classification ?? 'good'] ?? '·';
+                                const iconColor = classificationColors[reviewMove?.classification ?? 'good'] ?? '#0d6efd';
                                 return (
                                   <li key={idx} className={idx === moveIndex - 1 ? 'fw-bold text-primary' : ''}>
-                                    {notation}
+                                    <button
+                                      type="button"
+                                      className="btn btn-link p-0 text-decoration-none"
+                                      onClick={() => setMoveIndex(idx + 1)}
+                                    >
+                                      <span className="me-2 fw-bold" style={{ color: iconColor }}>{icon}</span>
+                                      <span className="text-dark">{notation}</span>
+                                    </button>
                                   </li>
                                 );
                               })}
                             </ol>
+                          </div>
+
+                          <div className="bg-white border rounded-3 p-2">
+                            <div className="fw-semibold mb-1">Move Insight</div>
+                            {activeReviewedMove ? (
+                              <>
+                                <div className="small mb-1">
+                                  <span className="badge bg-secondary me-2">{activeReviewedMove.phase}</span>
+                                  <span className="badge" style={{ backgroundColor: classificationColors[activeReviewedMove.classification] ?? '#6c757d' }}>
+                                    {activeReviewedMove.classification}
+                                  </span>
+                                </div>
+                                <div className="small text-muted mb-1">Best move: {activeReviewedMove.bestMove} | Eval drop: {activeReviewedMove.evalDrop} cp</div>
+                                <div className="small">{activeReviewedMove.comment}</div>
+                              </>
+                            ) : (
+                              <div className="small text-muted">Select a move to see review feedback.</div>
+                            )}
                           </div>
 
                           <div className="graph bg-light rounded-3 p-3 shadow-sm">
@@ -524,18 +713,16 @@ export default function Dashboard() {
                                   <ReferenceLine y={0} stroke="#6c757d" strokeDasharray="4 4" />
                                   <Tooltip />
                                   <Line type="monotone" dataKey="eval" stroke="#0d6efd" strokeWidth={2} dot={false} />
-                                  {chartData
-                                    .filter((point) => point.isBlunder)
-                                    .map((point) => (
-                                      <ReferenceDot
-                                        key={`blunder-${point.move}`}
-                                        x={point.move}
-                                        y={point.eval}
-                                        r={4}
-                                        fill="#dc3545"
-                                        stroke="#dc3545"
-                                      />
-                                    ))}
+                                  {chartData.map((point) => (
+                                    <ReferenceDot
+                                      key={`review-${point.move}`}
+                                      x={point.move}
+                                      y={point.eval}
+                                      r={4}
+                                      fill={point.dotColor}
+                                      stroke={point.dotColor}
+                                    />
+                                  ))}
                                 </LineChart>
                               </ResponsiveContainer>
                             ) : (
