@@ -166,6 +166,59 @@ function calcAccuracyFromAcpl(acpl: number): number {
   return Math.max(0, Math.min(100, Math.round(100 - acpl / 4)));
 }
 
+type EngineEval = {
+  cp: number;
+  bestMove: string;
+  mate?: number;
+};
+
+function toEngineScore(result: { cp?: number; mate?: number }): number {
+  if (typeof result.cp === 'number') {
+    return result.cp;
+  }
+  if (typeof result.mate === 'number') {
+    return result.mate > 0 ? 30000 : -30000;
+  }
+  return 0;
+}
+
+async function evaluatePositionsWithPool(
+  positions: { fen: string; sideToMove: 'w' | 'b' }[],
+  enginePool: Awaited<ReturnType<typeof loadWasmStockfish>>[],
+  depth: number,
+  timeout: number,
+  onProgress?: (done: number, total: number) => void
+) {
+  const results: EngineEval[] = new Array(positions.length);
+  let cursor = 0;
+  let completed = 0;
+
+  await Promise.all(
+    enginePool.map(async (engine) => {
+      while (true) {
+        const currentIndex = cursor;
+        cursor += 1;
+        if (currentIndex >= positions.length) {
+          break;
+        }
+
+        const result = await evaluateFenWithWasm(engine, positions[currentIndex].fen, depth, timeout);
+        const scoreFromSide = toEngineScore(result);
+        results[currentIndex] = {
+          cp: positions[currentIndex].sideToMove === 'w' ? scoreFromSide : -scoreFromSide,
+          bestMove: result.best || '',
+          mate: result.mate,
+        };
+
+        completed += 1;
+        onProgress?.(completed, positions.length);
+      }
+    })
+  );
+
+  return results;
+}
+
 async function analyzePgnInBrowser(
   pgn: string,
   onProgress?: (done: number, total: number) => void
@@ -189,23 +242,55 @@ async function analyzePgnInBrowser(
   }
 
   const wasmUrl = process.env.NEXT_PUBLIC_STOCKFISH_WASM_URL || 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
-  const engine = await loadWasmStockfish(wasmUrl);
+  const enginePoolSize = typeof navigator !== 'undefined'
+    ? Math.max(2, Math.min(4, Math.floor((navigator.hardwareConcurrency || 4) / 2)))
+    : 2;
 
-  const positionEvals: Array<{ cp: number; bestMove: string }> = [];
-  for (let i = 0; i < fens.length; i++) {
-    const result = await evaluateFenWithWasm(engine, fens[i], 9, 3000);
-    const cpFromSide =
-      typeof result.cp === 'number'
-        ? result.cp
-        : typeof result.mate === 'number'
-          ? (result.mate > 0 ? 30000 : -30000)
-          : 0;
-    const cpWhite = sideToMove[i] === 'w' ? cpFromSide : -cpFromSide;
-    positionEvals.push({ cp: cpWhite, bestMove: result.best || '' });
-    onProgress?.(i + 1, fens.length);
-  }
+  const engines = await Promise.all(
+    Array.from({ length: enginePoolSize }, () => loadWasmStockfish(wasmUrl))
+  );
 
-  const reviewedMoves: Array<{
+  try {
+    const positions = fens.map((fen, index) => ({ fen, sideToMove: sideToMove[index] }));
+
+    // Fast scan: low depth across all positions, parallelized across a small engine pool.
+    const quickPass = await evaluatePositionsWithPool(positions, engines, 6, 1200, onProgress);
+
+    const criticalIndices = new Set<number>();
+    for (let i = 0; i < sans.length; i++) {
+      const evalBefore = quickPass[i].cp;
+      const evalAfter = quickPass[i + 1].cp;
+      const evalDrop = i % 2 === 0 ? Math.max(0, evalBefore - evalAfter) : Math.max(0, evalAfter - evalBefore);
+      const isEndgame = i >= Math.max(0, sans.length - 8);
+      const isOpening = i < 8;
+      if (isOpening || isEndgame || evalDrop >= 35 || quickPass[i].mate !== undefined || quickPass[i + 1].mate !== undefined) {
+        criticalIndices.add(i);
+        criticalIndices.add(i + 1);
+      }
+    }
+
+    // Deep scan only on positions that actually matter.
+    const refinedPositions = Array.from(criticalIndices)
+      .sort((left, right) => left - right)
+      .map((index) => positions[index]);
+    const refinedEvals = refinedPositions.length > 0
+      ? await evaluatePositionsWithPool(refinedPositions, engines, 10, 2200)
+      : [];
+
+    const refinedByFen = new Map<string, EngineEval>();
+    refinedPositions.forEach((position, index) => {
+      const refined = refinedEvals[index];
+      if (refined) {
+        refinedByFen.set(position.fen, refined);
+      }
+    });
+
+    const positionEvals = quickPass.map((entry, index) => {
+      const refined = refinedByFen.get(positions[index].fen);
+      return refined || entry;
+    });
+
+    const reviewedMoves: Array<{
     moveNumber: number;
     san: string;
     bestMove: string;
@@ -218,129 +303,138 @@ async function analyzePgnInBrowser(
     comment: string;
   }> = [];
 
-  const timeline: Array<{ move: number; eval: number; classification: MoveClassification }> = [];
-  const criticalPositions: Array<{ moveNumber: number; classification: string }> = [];
-  const blunders: number[] = [];
-  const mistakes: number[] = [];
-  const inaccuracies: number[] = [];
+    const timeline: Array<{ move: number; eval: number; classification: MoveClassification }> = [];
+    const criticalPositions: Array<{ moveNumber: number; classification: string }> = [];
+    const blunders: number[] = [];
+    const mistakes: number[] = [];
+    const inaccuracies: number[] = [];
 
-  let whiteDropSum = 0;
-  let blackDropSum = 0;
-  let whiteMoves = 0;
-  let blackMoves = 0;
+    let whiteDropSum = 0;
+    let blackDropSum = 0;
+    let whiteMoves = 0;
+    let blackMoves = 0;
 
-  for (let i = 0; i < sans.length; i++) {
-    const side = i % 2 === 0 ? 'white' : 'black';
-    const evalBefore = positionEvals[i].cp;
-    const evalAfter = positionEvals[i + 1].cp;
-    const evalDrop = side === 'white' ? Math.max(0, evalBefore - evalAfter) : Math.max(0, evalAfter - evalBefore);
-    const classification = classifyDrop(evalDrop);
+    for (let i = 0; i < sans.length; i++) {
+      const side = i % 2 === 0 ? 'white' : 'black';
+      const evalBefore = positionEvals[i].cp;
+      const evalAfter = positionEvals[i + 1].cp;
+      const evalDrop = side === 'white' ? Math.max(0, evalBefore - evalAfter) : Math.max(0, evalAfter - evalBefore);
+      const classification = classifyDrop(evalDrop);
 
-    if (side === 'white') {
-      whiteDropSum += evalDrop;
-      whiteMoves++;
-    } else {
-      blackDropSum += evalDrop;
-      blackMoves++;
+      if (side === 'white') {
+        whiteDropSum += evalDrop;
+        whiteMoves++;
+      } else {
+        blackDropSum += evalDrop;
+        blackMoves++;
+      }
+
+      if (classification === 'blunder') blunders.push(i + 1);
+      if (classification === 'mistake') mistakes.push(i + 1);
+      if (classification === 'inaccuracy') inaccuracies.push(i + 1);
+      if (classification === 'blunder' || classification === 'mistake' || classification === 'inaccuracy') {
+        criticalPositions.push({ moveNumber: i + 1, classification });
+      }
+
+      const moveRatio = (i + 1) / Math.max(1, sans.length);
+      const phase = moveRatio <= 0.25 ? 'opening' : moveRatio >= 0.75 ? 'endgame' : 'middlegame';
+      reviewedMoves.push({
+        moveNumber: i + 1,
+        san: sans[i],
+        bestMove: positionEvals[i].bestMove || 'N/A',
+        evalBefore,
+        evalAfter,
+        evalDrop,
+        side,
+        phase,
+        classification,
+        comment:
+          classification === 'blunder'
+            ? 'Large evaluation swing after this move.'
+            : classification === 'mistake'
+              ? 'Significant inaccuracy that cost advantage.'
+              : classification === 'inaccuracy'
+                ? 'Small but meaningful loss of position value.'
+                : 'Solid move with limited loss.',
+      });
+
+      timeline.push({
+        move: i + 1,
+        eval: evalAfter,
+        classification,
+      });
     }
 
-    if (classification === 'blunder') blunders.push(i + 1);
-    if (classification === 'mistake') mistakes.push(i + 1);
-    if (classification === 'inaccuracy') inaccuracies.push(i + 1);
-    if (classification === 'blunder' || classification === 'mistake' || classification === 'inaccuracy') {
-      criticalPositions.push({ moveNumber: i + 1, classification });
-    }
+    const whiteAcpl = whiteMoves > 0 ? Math.round(whiteDropSum / whiteMoves) : 0;
+    const blackAcpl = blackMoves > 0 ? Math.round(blackDropSum / blackMoves) : 0;
+    const accuracyWhite = calcAccuracyFromAcpl(whiteAcpl);
+    const accuracyBlack = calcAccuracyFromAcpl(blackAcpl);
+    const accuracy = Math.round((accuracyWhite + accuracyBlack) / 2);
 
-    const moveRatio = (i + 1) / Math.max(1, sans.length);
-    const phase = moveRatio <= 0.25 ? 'opening' : moveRatio >= 0.75 ? 'endgame' : 'middlegame';
-    reviewedMoves.push({
-      moveNumber: i + 1,
-      san: sans[i],
-      bestMove: positionEvals[i].bestMove || 'N/A',
-      evalBefore,
-      evalAfter,
-      evalDrop,
-      side,
-      phase,
-      classification,
-      comment:
-        classification === 'blunder'
-          ? 'Large evaluation swing after this move.'
-          : classification === 'mistake'
-            ? 'Significant inaccuracy that cost advantage.'
-            : classification === 'inaccuracy'
-              ? 'Small but meaningful loss of position value.'
-              : 'Solid move with limited loss.',
-    });
+    const playerSummary = {
+      white: {
+        accuracy: accuracyWhite,
+        blunders: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'blunder').length,
+        mistakes: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'mistake').length,
+        inaccuracies: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'inaccuracy').length,
+        bestMoves: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'best').length,
+        greatMoves: 0,
+        brilliantMoves: 0,
+      },
+      black: {
+        accuracy: accuracyBlack,
+        blunders: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'blunder').length,
+        mistakes: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'mistake').length,
+        inaccuracies: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'inaccuracy').length,
+        bestMoves: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'best').length,
+        greatMoves: 0,
+        brilliantMoves: 0,
+      },
+    };
 
-    timeline.push({
-      move: i + 1,
-      eval: evalAfter,
-      classification,
-    });
-  }
+    const suggestions: string[] = [];
+    if (blunders.length > 0) suggestions.push(`Reduce blunders (${blunders.length}) by checking tactical threats before moving.`);
+    if (mistakes.length > 0) suggestions.push(`Review strategic decisions around mistake moves (${mistakes.length}).`);
+    if (inaccuracies.length > 0) suggestions.push(`Improve precision in calm positions (${inaccuracies.length} inaccuracies).`);
+    if (suggestions.length === 0) suggestions.push('Strong game quality. Keep reviewing move consistency.');
 
-  const whiteAcpl = whiteMoves > 0 ? Math.round(whiteDropSum / whiteMoves) : 0;
-  const blackAcpl = blackMoves > 0 ? Math.round(blackDropSum / blackMoves) : 0;
-  const accuracyWhite = calcAccuracyFromAcpl(whiteAcpl);
-  const accuracyBlack = calcAccuracyFromAcpl(blackAcpl);
-  const accuracy = Math.round((accuracyWhite + accuracyBlack) / 2);
-
-  const playerSummary = {
-    white: {
-      accuracy: accuracyWhite,
-      blunders: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'blunder').length,
-      mistakes: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'mistake').length,
-      inaccuracies: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'inaccuracy').length,
-      bestMoves: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'best').length,
-      greatMoves: 0,
-      brilliantMoves: 0,
-    },
-    black: {
-      accuracy: accuracyBlack,
-      blunders: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'blunder').length,
-      mistakes: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'mistake').length,
-      inaccuracies: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'inaccuracy').length,
-      bestMoves: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'best').length,
-      greatMoves: 0,
-      brilliantMoves: 0,
-    },
-  };
-
-  const suggestions: string[] = [];
-  if (blunders.length > 0) suggestions.push(`Reduce blunders (${blunders.length}) by checking tactical threats before moving.`);
-  if (mistakes.length > 0) suggestions.push(`Review strategic decisions around mistake moves (${mistakes.length}).`);
-  if (inaccuracies.length > 0) suggestions.push(`Improve precision in calm positions (${inaccuracies.length} inaccuracies).`);
-  if (suggestions.length === 0) suggestions.push('Strong game quality. Keep reviewing move consistency.');
-
-  return {
-    moveEvals: positionEvals.slice(1).map((p) => p.cp),
-    acpl: Math.round((whiteAcpl + blackAcpl) / 2),
-    accuracy,
-    accuracyWhite,
-    accuracyBlack,
-    blunders,
-    mistakes,
-    inaccuracies,
-    criticalPositions,
-    reviewedMoves,
-    timeline,
-    playerSummary,
-    estimatedRating: {
-      white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
-      black: Math.max(600, Math.min(2900, Math.round(600 + accuracyBlack * 20))),
-    },
-    suggestions,
-    review: {
-      timeline,
+    return {
+      moveEvals: positionEvals.slice(1).map((p) => p.cp),
+      acpl: Math.round((whiteAcpl + blackAcpl) / 2),
+      accuracy,
+      accuracyWhite,
+      accuracyBlack,
+      blunders,
+      mistakes,
+      inaccuracies,
+      criticalPositions,
       reviewedMoves,
+      timeline,
       playerSummary,
       estimatedRating: {
         white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
         black: Math.max(600, Math.min(2900, Math.round(600 + accuracyBlack * 20))),
       },
-    },
-  };
+      suggestions,
+      review: {
+        timeline,
+        reviewedMoves,
+        playerSummary,
+        estimatedRating: {
+          white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
+          black: Math.max(600, Math.min(2900, Math.round(600 + accuracyBlack * 20))),
+        },
+      },
+    };
+  } finally {
+    engines.forEach((engine) => {
+      try {
+        engine?.terminate?.();
+      } catch {
+        // ignore cleanup issues
+      }
+    });
+  }
 }
 
 export default function Dashboard() {
