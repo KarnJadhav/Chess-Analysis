@@ -157,6 +157,7 @@ export default function Dashboard() {
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [message, setMessage] = useState('');
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -246,12 +247,25 @@ export default function Dashboard() {
     if (session) fetchGames();
   }, [session, search, dateFilter, resultFilter]);
 
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
+
   if (!session) {
     return <div className="d-flex align-items-center justify-content-center min-vh-100 bg-primary text-white fw-bold fs-4">You must be signed in to view this page.</div>;
   }
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
     setUploading(true);
     setMessage('');
     const res = await fetch('/api/games/upload', {
@@ -278,10 +292,18 @@ export default function Dashboard() {
         : gamesData.games && gamesData.games[0];
 
       if (trackedGame && trackedGame.analysisComplete) {
+        if (pollTimerRef.current) {
+          clearTimeout(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
         setAnalyzing(false);
         setGames(gamesData.games);
         setMessage('Analysis complete! Suggestions updated.');
       } else if (trackedGame && trackedGame.analysisStatus === 'failed') {
+        if (pollTimerRef.current) {
+          clearTimeout(pollTimerRef.current);
+          pollTimerRef.current = null;
+        }
         setAnalyzing(false);
         setGames(gamesData.games);
         setMessage(
@@ -289,7 +311,7 @@ export default function Dashboard() {
         );
       } else {
         setGames(gamesData.games);
-        setTimeout(pollAnalysis, 4000);
+        pollTimerRef.current = setTimeout(pollAnalysis, 4000);
       }
     };
     pollAnalysis();
