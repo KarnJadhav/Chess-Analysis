@@ -3,6 +3,7 @@ import { useSession, signOut } from 'next-auth/react';
 import { useState, useRef, useEffect } from 'react';
 import { Chess } from 'chess.js';
 import { Game } from '@/models/Game';
+import { loadWasmStockfish, evaluateFenWithWasm } from '@/lib/wasmStockfish';
 import {
   LineChart,
   Line,
@@ -151,13 +152,203 @@ const classificationIcons: Record<string, string> = {
   blunder: '??',
 };
 
+type MoveClassification = 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+
+function classifyDrop(drop: number): MoveClassification {
+  if (drop >= 200) return 'blunder';
+  if (drop >= 90) return 'mistake';
+  if (drop >= 45) return 'inaccuracy';
+  if (drop <= 5) return 'best';
+  return 'good';
+}
+
+function calcAccuracyFromAcpl(acpl: number): number {
+  return Math.max(0, Math.min(100, Math.round(100 - acpl / 4)));
+}
+
+async function analyzePgnInBrowser(
+  pgn: string,
+  onProgress?: (done: number, total: number) => void
+) {
+  const chess = new Chess();
+  chess.loadPgn(pgn);
+  const verboseMoves = chess.history({ verbose: true });
+
+  const replay = new Chess();
+  replay.loadPgn(pgn);
+  replay.reset();
+
+  const fens: string[] = [replay.fen()];
+  const sideToMove: Array<'w' | 'b'> = [replay.turn()];
+  const sans: string[] = [];
+  for (const mv of verboseMoves) {
+    sans.push(mv.san);
+    replay.move(mv);
+    fens.push(replay.fen());
+    sideToMove.push(replay.turn());
+  }
+
+  const wasmUrl = process.env.NEXT_PUBLIC_STOCKFISH_WASM_URL || 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
+  const engine = await loadWasmStockfish(wasmUrl);
+
+  const positionEvals: Array<{ cp: number; bestMove: string }> = [];
+  for (let i = 0; i < fens.length; i++) {
+    const result = await evaluateFenWithWasm(engine, fens[i], 9, 3000);
+    const cpFromSide =
+      typeof result.cp === 'number'
+        ? result.cp
+        : typeof result.mate === 'number'
+          ? (result.mate > 0 ? 30000 : -30000)
+          : 0;
+    const cpWhite = sideToMove[i] === 'w' ? cpFromSide : -cpFromSide;
+    positionEvals.push({ cp: cpWhite, bestMove: result.best || '' });
+    onProgress?.(i + 1, fens.length);
+  }
+
+  const reviewedMoves: Array<{
+    moveNumber: number;
+    san: string;
+    bestMove: string;
+    evalBefore: number;
+    evalAfter: number;
+    evalDrop: number;
+    side: 'white' | 'black';
+    phase: 'opening' | 'middlegame' | 'endgame';
+    classification: MoveClassification;
+    comment: string;
+  }> = [];
+
+  const timeline: Array<{ move: number; eval: number; classification: MoveClassification }> = [];
+  const criticalPositions: Array<{ moveNumber: number; classification: string }> = [];
+  const blunders: number[] = [];
+  const mistakes: number[] = [];
+  const inaccuracies: number[] = [];
+
+  let whiteDropSum = 0;
+  let blackDropSum = 0;
+  let whiteMoves = 0;
+  let blackMoves = 0;
+
+  for (let i = 0; i < sans.length; i++) {
+    const side = i % 2 === 0 ? 'white' : 'black';
+    const evalBefore = positionEvals[i].cp;
+    const evalAfter = positionEvals[i + 1].cp;
+    const evalDrop = side === 'white' ? Math.max(0, evalBefore - evalAfter) : Math.max(0, evalAfter - evalBefore);
+    const classification = classifyDrop(evalDrop);
+
+    if (side === 'white') {
+      whiteDropSum += evalDrop;
+      whiteMoves++;
+    } else {
+      blackDropSum += evalDrop;
+      blackMoves++;
+    }
+
+    if (classification === 'blunder') blunders.push(i + 1);
+    if (classification === 'mistake') mistakes.push(i + 1);
+    if (classification === 'inaccuracy') inaccuracies.push(i + 1);
+    if (classification === 'blunder' || classification === 'mistake' || classification === 'inaccuracy') {
+      criticalPositions.push({ moveNumber: i + 1, classification });
+    }
+
+    const moveRatio = (i + 1) / Math.max(1, sans.length);
+    const phase = moveRatio <= 0.25 ? 'opening' : moveRatio >= 0.75 ? 'endgame' : 'middlegame';
+    reviewedMoves.push({
+      moveNumber: i + 1,
+      san: sans[i],
+      bestMove: positionEvals[i].bestMove || 'N/A',
+      evalBefore,
+      evalAfter,
+      evalDrop,
+      side,
+      phase,
+      classification,
+      comment:
+        classification === 'blunder'
+          ? 'Large evaluation swing after this move.'
+          : classification === 'mistake'
+            ? 'Significant inaccuracy that cost advantage.'
+            : classification === 'inaccuracy'
+              ? 'Small but meaningful loss of position value.'
+              : 'Solid move with limited loss.',
+    });
+
+    timeline.push({
+      move: i + 1,
+      eval: evalAfter,
+      classification,
+    });
+  }
+
+  const whiteAcpl = whiteMoves > 0 ? Math.round(whiteDropSum / whiteMoves) : 0;
+  const blackAcpl = blackMoves > 0 ? Math.round(blackDropSum / blackMoves) : 0;
+  const accuracyWhite = calcAccuracyFromAcpl(whiteAcpl);
+  const accuracyBlack = calcAccuracyFromAcpl(blackAcpl);
+  const accuracy = Math.round((accuracyWhite + accuracyBlack) / 2);
+
+  const playerSummary = {
+    white: {
+      accuracy: accuracyWhite,
+      blunders: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'blunder').length,
+      mistakes: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'mistake').length,
+      inaccuracies: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'inaccuracy').length,
+      bestMoves: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'best').length,
+      greatMoves: 0,
+      brilliantMoves: 0,
+    },
+    black: {
+      accuracy: accuracyBlack,
+      blunders: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'blunder').length,
+      mistakes: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'mistake').length,
+      inaccuracies: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'inaccuracy').length,
+      bestMoves: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'best').length,
+      greatMoves: 0,
+      brilliantMoves: 0,
+    },
+  };
+
+  const suggestions: string[] = [];
+  if (blunders.length > 0) suggestions.push(`Reduce blunders (${blunders.length}) by checking tactical threats before moving.`);
+  if (mistakes.length > 0) suggestions.push(`Review strategic decisions around mistake moves (${mistakes.length}).`);
+  if (inaccuracies.length > 0) suggestions.push(`Improve precision in calm positions (${inaccuracies.length} inaccuracies).`);
+  if (suggestions.length === 0) suggestions.push('Strong game quality. Keep reviewing move consistency.');
+
+  return {
+    moveEvals: positionEvals.slice(1).map((p) => p.cp),
+    acpl: Math.round((whiteAcpl + blackAcpl) / 2),
+    accuracy,
+    accuracyWhite,
+    accuracyBlack,
+    blunders,
+    mistakes,
+    inaccuracies,
+    criticalPositions,
+    reviewedMoves,
+    timeline,
+    playerSummary,
+    estimatedRating: {
+      white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
+      black: Math.max(600, Math.min(2900, Math.round(600 + accuracyBlack * 20))),
+    },
+    suggestions,
+    review: {
+      timeline,
+      reviewedMoves,
+      playerSummary,
+      estimatedRating: {
+        white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
+        black: Math.max(600, Math.min(2900, Math.round(600 + accuracyBlack * 20))),
+      },
+    },
+  };
+}
+
 export default function Dashboard() {
   const { data: session } = useSession();
   const [pgn, setPgn] = useState('');
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [message, setMessage] = useState('');
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -247,74 +438,65 @@ export default function Dashboard() {
     if (session) fetchGames();
   }, [session, search, dateFilter, resultFilter]);
 
-  useEffect(() => {
-    return () => {
-      if (pollTimerRef.current) {
-        clearTimeout(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
-    };
-  }, []);
-
   if (!session) {
     return <div className="d-flex align-items-center justify-content-center min-vh-100 bg-primary text-white fw-bold fs-4">You must be signed in to view this page.</div>;
   }
 
   async function handleUpload(e: React.FormEvent) {
     e.preventDefault();
-    if (pollTimerRef.current) {
-      clearTimeout(pollTimerRef.current);
-      pollTimerRef.current = null;
-    }
     setUploading(true);
     setMessage('');
-    const res = await fetch('/api/games/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pgn }),
-      credentials: 'include',
-    });
-    const data = await res.json();
-    setUploading(false);
-    if (data.error) {
-      setMessage(data.error);
-      return;
-    }
-    setMessage('Game uploaded and analysis started!');
-    setAnalyzing(true);
-    const uploadedGameId = typeof data.gameId === 'string' ? data.gameId : undefined;
-    // Poll for analysis completion
-    const pollAnalysis = async () => {
+    try {
+      const res = await fetch('/api/games/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pgn }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+
+      if (data.error) {
+        setMessage(data.error);
+        return;
+      }
+
+      const uploadedGameId = typeof data.gameId === 'string' ? data.gameId : String(data.gameId || '');
+      if (!uploadedGameId) {
+        setMessage('Upload succeeded, but no game ID was returned.');
+        return;
+      }
+
+      setAnalyzing(true);
+      setMessage('Game uploaded. Running analysis in your browser...');
+
+      const analysis = await analyzePgnInBrowser(pgn, (done, total) => {
+        setMessage(`Analyzing with Stockfish (${done}/${total} positions)...`);
+      });
+
+      const saveRes = await fetch('/api/games/analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ gameId: uploadedGameId, analysis }),
+      });
+      const saveData = await saveRes.json();
+      if (saveData.error) {
+        throw new Error(saveData.error);
+      }
+
+      setMessage('Analysis complete and saved.');
+      setPgn('');
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Analysis failed';
+      setMessage(`Analysis failed: ${errorMessage}`);
+    } finally {
+      setUploading(false);
+      setAnalyzing(false);
+
       const gamesRes = await fetch('/api/games/list?analysis=true', { credentials: 'include' });
       const gamesData = await gamesRes.json();
-      const trackedGame = uploadedGameId
-        ? (gamesData.games || []).find((game: Game) => game._id === uploadedGameId)
-        : gamesData.games && gamesData.games[0];
-
-      if (trackedGame && trackedGame.analysisComplete) {
-        if (pollTimerRef.current) {
-          clearTimeout(pollTimerRef.current);
-          pollTimerRef.current = null;
-        }
-        setAnalyzing(false);
-        setGames(gamesData.games);
-        setMessage('Analysis complete! Suggestions updated.');
-      } else if (trackedGame && trackedGame.analysisStatus === 'failed') {
-        if (pollTimerRef.current) {
-          clearTimeout(pollTimerRef.current);
-          pollTimerRef.current = null;
-        }
-        setAnalyzing(false);
-        setGames(gamesData.games);
-        setMessage(
-          `Analysis failed: ${trackedGame.analysisError || 'Stockfish engine unavailable. Check STOCKFISH_PATH.'}`
-        );
-      } else {
-        setGames(gamesData.games);
-        pollTimerRef.current = setTimeout(pollAnalysis, 4000);
-      }
-    };
-    pollAnalysis();
+      setGames(gamesData.games || []);
+    }
   }
 
   // Deduplicate suggestions using Set to avoid repeats

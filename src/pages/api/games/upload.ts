@@ -52,34 +52,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     // Insert game
     const result = await db.collection<Game>('games').insertOne(game);
 
-    // Trigger Stockfish analysis asynchronously (fire and forget)
-    // This prevents the API response from being delayed by analysis
-    (async () => {
-      try {
-        const { analyzePGNAndSave } = await import('@/lib/stockfishAnalysis');
-        await analyzePGNAndSave({ pgn: validatedPgn, userId, gameId: result.insertedId.toString() });
-      } catch (err) {
-        console.error('Stockfish analysis failed for game:', result.insertedId, err);
-        // Update game record to mark analysis as failed
-        try {
-          await db.collection<Game>('games').updateOne(
-            { _id: result.insertedId },
-            {
-              $set: {
-                analysisStatus: 'failed',
-                analysisComplete: false,
-                analysisError: err instanceof Error ? err.message : 'Unknown error',
-              },
-            }
-          );
-        } catch (updateErr) {
-          console.error('Failed to update analysis status:', updateErr);
-        }
-      }
-    })();
-
     return res.status(201).json({ 
-      message: 'Game uploaded successfully. Analysis will be available shortly.',
+      message: 'Game uploaded successfully. Analysis pending.',
       gameId: result.insertedId 
     });
   } catch (err) {

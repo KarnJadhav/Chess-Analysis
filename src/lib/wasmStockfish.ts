@@ -59,6 +59,7 @@ export interface EvalResult {
 export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, depth = 12, timeout = 5000): Promise<EvalResult> {
   return new Promise((resolve) => {
     let resolved = false;
+    const result: EvalResult = {};
     const onmessage = (e: MessageEvent) => {
       const data = typeof e.data === 'string' ? e.data : (e.data && e.data.data) || '';
       // parse lines like: info depth 12 seldepth 18 score cp 13 ... pv e2e4 ...
@@ -69,10 +70,11 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
         // bestmove e2e4 ponder d7d5
         const parts = line.split(' ');
         const best = parts[1];
+        result.best = best;
         if (!resolved) {
           resolved = true;
           engine.onmessage = null;
-          resolve({ best });
+          resolve(result);
         }
       }
 
@@ -82,11 +84,11 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
           const kind = m[1];
           const val = parseInt(m[2], 10);
           if (kind === 'cp') {
-            // update last seen cp
-            // don't resolve until bestmove or timeout, but keep best interim
-            // attach to closure
+            result.cp = val;
+            delete result.mate;
           } else {
-            // mate
+            result.mate = val;
+            delete result.cp;
           }
         }
       }
@@ -113,7 +115,7 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
       } catch (e) {
         if (!resolved) {
           resolved = true;
-          resolve({});
+          resolve(result);
         }
       }
     }
@@ -125,7 +127,7 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
           engine.postMessage('stop');
           engine.onmessage = null;
         } catch (_) {}
-        resolve({});
+        resolve(result);
       }
     }, timeout);
   });
