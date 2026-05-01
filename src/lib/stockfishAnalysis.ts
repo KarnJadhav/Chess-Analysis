@@ -1,6 +1,4 @@
 import { Chess } from 'chess.js';
-import { spawn } from 'child_process';
-import { existsSync } from 'fs';
 import clientPromise from '@/lib/mongodb';
 import { config } from '@/lib/config';
 import { detectOpeningFromMoves } from '@/lib/openings';
@@ -70,6 +68,11 @@ interface Engine {
   close: () => void;
 }
 
+interface StockfishEngine {
+  listener?: (line: string) => void;
+  sendCommand: (cmd: string) => void;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function mateToCp(mateIn: number): number {
@@ -106,12 +109,6 @@ function accuracyFromACPL(avgLossCp: number): number {
   return Math.max(0, Math.min(100, Math.round(raw)));
 }
 
-function isSpawnError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const m = err.message.toLowerCase();
-  return m.includes('enoent') || m.includes('not found') || m.includes('failed to spawn');
-}
-
 // ─── Engine factory ───────────────────────────────────────────────────────────
 
 /**
@@ -123,18 +120,8 @@ function isSpawnError(err: unknown): boolean {
  * timeouts on long games and defeats UCI's design purpose.
  */
 async function createEngine(): Promise<Engine> {
-  const sfPath = config.stockfish.path;
-
-  if ((sfPath.includes('/') || sfPath.includes('\\')) && !existsSync(sfPath)) {
-    throw new Error(`Stockfish not found at: ${sfPath}`);
-  }
-
-  let proc: ReturnType<typeof spawn>;
-  try {
-    proc = spawn(sfPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
-  } catch (e) {
-    throw new Error(`Failed to spawn Stockfish: ${e instanceof Error ? e.message : e}`);
-  }
+  const stockfishModule = await import('stockfish');
+  const initStockfish = stockfishModule.default as unknown as (enginePath?: string, cb?: (err: unknown, engine: StockfishEngine) => void) => Promise<StockfishEngine> | StockfishEngine;
 
   let buf = '';
   let closed = false;
@@ -156,6 +143,7 @@ async function createEngine(): Promise<Engine> {
 
   const queue: Job[] = [];
   let active: Active | null = null;
+  let engine: StockfishEngine | null = null;
 
   let onReady: (() => void) | null = null;
   let onReadyErr: ((e: unknown) => void) | null = null;
@@ -165,18 +153,8 @@ async function createEngine(): Promise<Engine> {
     onReadyErr?.(new Error('Stockfish startup timeout'));
   }, config.stockfish.timeout);
 
-  const failAll = (err: Error) => {
-    if (closed) return;
-    closed = true;
-    clearTimeout(startupTimeout);
-    if (!engineReady) onReadyErr?.(err);
-    if (active) { clearTimeout(active.timer); active.job.reject(err); active = null; }
-    for (const job of queue) job.reject(err);
-    queue.length = 0;
-  };
-
   const pump = () => {
-    if (!engineReady || closed || active || queue.length === 0) return;
+    if (!engineReady || closed || active || queue.length === 0 || !engine) return;
     const job = queue.shift();
     if (!job) return;
 
@@ -191,8 +169,8 @@ async function createEngine(): Promise<Engine> {
     active = { job, timer, lastEval: 0, bestMove: '(none)' };
 
     try {
-      proc.stdin?.write(`position fen ${job.fen}\n`);
-      proc.stdin?.write(`go depth ${config.stockfish.depth}\n`);
+      engine.sendCommand(`position fen ${job.fen}`);
+      engine.sendCommand(`go depth ${config.stockfish.depth}`);
     } catch (e) {
       clearTimeout(timer);
       active = null;
@@ -201,10 +179,7 @@ async function createEngine(): Promise<Engine> {
     }
   };
 
-  proc.on('error', (e) => failAll(new Error(`Stockfish process error: ${e.message}`)));
-  proc.on('exit', (code) => { if (!closed) failAll(new Error(`Stockfish exited (code ${code})`)); });
-
-  proc.stdout?.on('data', (chunk: Buffer) => {
+  const handleOutput = (chunk: string) => {
     buf += chunk.toString();
     const lines = buf.split('\n');
     buf = lines.pop() ?? '';
@@ -213,7 +188,10 @@ async function createEngine(): Promise<Engine> {
       const line = raw.trim();
       if (!line) continue;
 
-      if (line === 'uciok')   { proc.stdin?.write('isready\n'); continue; }
+      if (line === 'uciok') {
+        engine?.sendCommand('isready');
+        continue;
+      }
 
       if (line === 'readyok') {
         if (!engineReady) {
@@ -243,27 +221,48 @@ async function createEngine(): Promise<Engine> {
         pump();
       }
     }
+  };
+
+  await new Promise<void>((resolve, reject) => {
+    const pendingEngine = initStockfish('lite-single', (err, createdEngine) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      engine = createdEngine;
+      engine.listener = handleOutput;
+      resolve();
+    }) as StockfishEngine;
+
+    pendingEngine.listener = handleOutput;
   });
 
-  proc.stderr?.on('data', (d: Buffer) => {
-    const msg = d.toString().trim();
-    if (msg) console.warn('[Stockfish stderr]', msg);
-  });
+  if (!engine) {
+    throw new Error('Failed to initialize Stockfish engine');
+  }
 
-  proc.stdin?.write('uci\n');
+  const readyEngine = engine as StockfishEngine;
+  readyEngine.sendCommand('uci');
   await readyPromise;
 
   return {
     search: (fen) => new Promise<SearchResult>((resolve, reject) => {
-      if (closed) { reject(new Error('Engine is closed')); return; }
+      if (closed) {
+        reject(new Error('Engine is closed'));
+        return;
+      }
       queue.push({ fen, resolve, reject });
       pump();
     }),
     close: () => {
       if (closed) return;
       closed = true;
-      try { proc.stdin?.write('quit\n'); } catch { /* ok */ }
-      proc.kill();
+      try {
+        engine?.sendCommand('quit');
+      } catch {
+        // ignore shutdown errors
+      }
     },
   };
 }
@@ -357,7 +356,6 @@ export async function analyzePGNAndSave({
         try {
           result = await engine.search(fens[i]);
         } catch (err) {
-          if (isSpawnError(err)) throw err;
           console.warn(`[Analysis] Engine failed on position ${i}:`, err);
           const lastWhite = evalsWhite.at(-1) ?? 0;
           result = {
@@ -504,7 +502,6 @@ export async function analyzePGNAndSave({
       engine?.close();
       engine = null;
       console.error('[Analysis] Fatal error:', err);
-      if (isSpawnError(err)) throw err;
       continue;
     }
   }
