@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { useRouter } from 'next/router';
+import { GetServerSideProps } from 'next';
 
 const errorMessages: Record<string, string> = {
   Configuration: 'The authentication service is missing one or more required environment variables.',
@@ -8,9 +8,7 @@ const errorMessages: Record<string, string> = {
   default: 'An authentication error occurred. Please try again.',
 };
 
-export default function AuthErrorPage() {
-  const router = useRouter();
-  const error = typeof router.query.error === 'string' ? router.query.error : 'default';
+export default function AuthErrorPage({ error }: { error: string }) {
   const message = errorMessages[error] || errorMessages.default;
 
   return (
@@ -31,3 +29,10 @@ export default function AuthErrorPage() {
     </div>
   );
 }
+
+export const getServerSideProps: GetServerSideProps = async (context) => {
+  const error = typeof context.query.error === 'string' ? context.query.error : 'default';
+  return {
+    props: { error },
+  };
+};
