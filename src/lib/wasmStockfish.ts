@@ -19,23 +19,7 @@ type StockfishGlobal = Window & {
 };
 
 const DEFAULT_STOCKFISH_URL = '/stockfish/stockfish-18-lite-single.js';
-
-function loadScript(url: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[data-src="${url}"]`)) {
-      resolve();
-      return;
-    }
-
-    const script = document.createElement('script');
-    script.src = url;
-    script.async = true;
-    script.setAttribute('data-src', url);
-    script.onload = () => resolve();
-    script.onerror = (error) => reject(error);
-    document.head.appendChild(script);
-  });
-}
+const DEFAULT_STOCKFISH_WASM_URL = '/stockfish/stockfish-18-lite-single.wasm';
 
 async function createFromGlobal(): Promise<StockfishWorker> {
   const stockfishWindow = window as StockfishGlobal;
@@ -50,6 +34,15 @@ async function createFromGlobal(): Promise<StockfishWorker> {
   } catch {
     return await Promise.resolve(factory());
   }
+}
+
+function createWorker(scriptUrl: string, wasmUrl: string): StockfishWorker {
+  if (typeof Worker === 'undefined') {
+    throw new Error('Web Worker support is required for browser Stockfish');
+  }
+
+  const workerUrl = `${scriptUrl}#${encodeURIComponent(wasmUrl)},worker`;
+  return new Worker(workerUrl);
 }
 
 function sendCommand(engine: StockfishWorker, command: string) {
@@ -89,14 +82,7 @@ export async function loadWasmStockfish(scriptUrl: string = DEFAULT_STOCKFISH_UR
     return await createFromGlobal();
   }
 
-  await loadScript(scriptUrl);
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  if (stockfishWindow.Stockfish || stockfishWindow.stockfish) {
-    return await createFromGlobal();
-  }
-
-  throw new Error('Failed to load Stockfish WASM from ' + scriptUrl);
+  return createWorker(scriptUrl, DEFAULT_STOCKFISH_WASM_URL);
 }
 
 export interface EvalResult {
