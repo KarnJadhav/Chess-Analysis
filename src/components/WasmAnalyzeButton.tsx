@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { config } from '../lib/config';
 import { loadWasmStockfish, evaluateFenWithWasm, EvalResult } from '../lib/wasmStockfish';
 
 type Props = {
@@ -14,12 +13,11 @@ export default function WasmAnalyzeButton({ fen, depth = 12 }: Props) {
   async function run() {
     setLoading(true);
     try {
-      const engine = await loadWasmStockfish(config.stockfish.wasm.url);
+      const engine = await loadWasmStockfish();
       const r = await evaluateFenWithWasm(engine, fen, depth, 8000);
       setResult(r);
     } catch (err) {
       // surface error for debugging
-      // eslint-disable-next-line no-console
       console.error(err);
       setResult({});
     } finally {

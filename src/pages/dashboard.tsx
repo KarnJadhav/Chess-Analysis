@@ -241,13 +241,12 @@ async function analyzePgnInBrowser(
     sideToMove.push(replay.turn());
   }
 
-  const wasmUrl = process.env.NEXT_PUBLIC_STOCKFISH_WASM_URL || 'https://cdn.jsdelivr.net/npm/stockfish.js@10.0.2/stockfish.js';
   const enginePoolSize = typeof navigator !== 'undefined'
     ? Math.max(2, Math.min(4, Math.floor((navigator.hardwareConcurrency || 4) / 2)))
     : 2;
 
   const engines = await Promise.all(
-    Array.from({ length: enginePoolSize }, () => loadWasmStockfish(wasmUrl))
+    Array.from({ length: enginePoolSize }, () => loadWasmStockfish())
   );
 
   try {

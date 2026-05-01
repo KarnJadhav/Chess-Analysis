@@ -1,53 +1,102 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment, @typescript-eslint/no-unused-vars */
-// Lightweight wrapper to load a Stockfish WASM engine in the browser and evaluate FENs.
-type StockfishWorker = Worker | any;
+// Lightweight wrapper to load a Stockfish engine in the browser and evaluate FENs.
+type StockfishWorker = {
+  listener?: ((data: string) => void) | null;
+  sendCommand?: (command: string) => void;
+  postMessage?: (command: string) => void;
+  send?: (command: string) => void;
+  terminate?: () => void;
+  onmessage?: ((event: MessageEvent) => void) | null;
+};
+
+type StockfishFactory = {
+  new (): StockfishWorker;
+  (...args: unknown[]): StockfishWorker | Promise<StockfishWorker>;
+};
+
+type StockfishGlobal = Window & {
+  Stockfish?: StockfishFactory;
+  stockfish?: StockfishFactory;
+};
+
+const DEFAULT_STOCKFISH_URL = '/stockfish/stockfish-18-lite-single.js';
 
 function loadScript(url: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[data-src="${url}"]`)) return resolve();
-    const s = document.createElement('script');
-    s.src = url;
-    s.async = true;
-    s.setAttribute('data-src', url);
-    s.onload = () => resolve();
-    s.onerror = (e) => reject(e);
-    document.head.appendChild(s);
+    if (document.querySelector(`script[data-src="${url}"]`)) {
+      resolve();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = url;
+    script.async = true;
+    script.setAttribute('data-src', url);
+    script.onload = () => resolve();
+    script.onerror = (error) => reject(error);
+    document.head.appendChild(script);
   });
 }
 
-export async function loadWasmStockfish(wasmUrl: string): Promise<StockfishWorker> {
-  // Many stockfish wasm bundles expose a global `Stockfish` constructor/factory.
-  // Try to load the script and then instantiate.
-  if (typeof window === 'undefined') throw new Error('WASM Stockfish only available in browser');
-  if ((window as any).Stockfish || (window as any).stockfish) {
-    // already present
-    // @ts-ignore
-    return createFromGlobal();
+async function createFromGlobal(): Promise<StockfishWorker> {
+  const stockfishWindow = window as StockfishGlobal;
+  const globalStockfish = stockfishWindow.Stockfish || stockfishWindow.stockfish;
+  if (!globalStockfish) {
+    throw new Error('Stockfish global not found after script load');
   }
 
-  await loadScript(wasmUrl);
-  // wait a tick for the script to initialize
-  await new Promise((r) => setTimeout(r, 50));
-
-  if ((window as any).Stockfish || (window as any).stockfish) {
-    return createFromGlobal();
+  const factory = globalStockfish as StockfishFactory;
+  try {
+    return await Promise.resolve(new factory());
+  } catch {
+    return await Promise.resolve(factory());
   }
-
-  throw new Error('Failed to load Stockfish WASM from ' + wasmUrl);
 }
 
-function createFromGlobal(): StockfishWorker {
-  // @ts-ignore
-  const S = (window as any).Stockfish || (window as any).stockfish;
-  // Some bundles expose a factory function returning a Worker-like interface
-  try {
-    // @ts-ignore
-    const inst = typeof S === 'function' ? new S() : S();
-    return inst;
-  } catch (e) {
-    // @ts-ignore
-    return S;
+function sendCommand(engine: StockfishWorker, command: string) {
+  if (typeof engine.sendCommand === 'function') {
+    engine.sendCommand(command);
+    return;
   }
+  if (typeof engine.postMessage === 'function') {
+    engine.postMessage(command);
+    return;
+  }
+  if (typeof engine.send === 'function') {
+    engine.send(command);
+  }
+}
+
+function attachListener(engine: StockfishWorker, listener: (data: string) => void) {
+  if ('listener' in engine) {
+    engine.listener = listener;
+    return;
+  }
+  if ('onmessage' in engine) {
+    engine.onmessage = (event: MessageEvent) => {
+      const data = typeof event.data === 'string' ? event.data : (event.data && event.data.data) || '';
+      if (typeof data === 'string') {
+        listener(data);
+      }
+    };
+  }
+}
+
+export async function loadWasmStockfish(scriptUrl: string = DEFAULT_STOCKFISH_URL): Promise<StockfishWorker> {
+  if (typeof window === 'undefined') throw new Error('WASM Stockfish only available in browser');
+
+  const stockfishWindow = window as StockfishGlobal;
+  if (stockfishWindow.Stockfish || stockfishWindow.stockfish) {
+    return await createFromGlobal();
+  }
+
+  await loadScript(scriptUrl);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  if (stockfishWindow.Stockfish || stockfishWindow.stockfish) {
+    return await createFromGlobal();
+  }
+
+  throw new Error('Failed to load Stockfish WASM from ' + scriptUrl);
 }
 
 export interface EvalResult {
@@ -60,26 +109,22 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
   return new Promise((resolve) => {
     let resolved = false;
     const result: EvalResult = {};
-    const onmessage = (e: MessageEvent) => {
-      const data = typeof e.data === 'string' ? e.data : (e.data && e.data.data) || '';
-      // parse lines like: info depth 12 seldepth 18 score cp 13 ... pv e2e4 ...
-      if (typeof data !== 'string') return;
-      const line = data.toString().trim();
-      if (!line) return;
-      if (line.startsWith('bestmove')) {
-        // bestmove e2e4 ponder d7d5
-        const parts = line.split(' ');
-        const best = parts[1];
-        result.best = best;
+    const onLine = (line: string) => {
+      const normalized = line.trim();
+      if (!normalized) return;
+      if (normalized.startsWith('bestmove')) {
+        const parts = normalized.split(' ');
+        result.best = parts[1];
         if (!resolved) {
           resolved = true;
-          engine.onmessage = null;
+          attachListener(engine, () => {});
           resolve(result);
         }
+        return;
       }
 
-      if (line.indexOf('score') !== -1) {
-        const m = /score\s+(cp|mate)\s+(-?\d+)/.exec(line);
+      if (normalized.includes(' score ')) {
+        const m = /score\s+(cp|mate)\s+(-?\d+)/.exec(normalized);
         if (m) {
           const kind = m[1];
           const val = parseInt(m[2], 10);
@@ -94,25 +139,26 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
       }
     };
 
-    // Fallback simplistic flow: send UCI commands and wait for bestmove or timeout
+    // Support both the stockfish npm package protocol (listener/sendCommand)
+    // and generic worker-like protocols for older bundles.
     try {
-      engine.onmessage = onmessage;
-      engine.postMessage('uci');
-      engine.postMessage('ucinewgame');
-      engine.postMessage('position fen ' + fen);
-      engine.postMessage('go depth ' + depth);
-    } catch (err) {
-      // some bundles use send()/postMessage differences
+      attachListener(engine, (data: string) => {
+        const lines = String(data).split(/\r?\n/);
+        for (const line of lines) {
+          onLine(line);
+        }
+      });
+      sendCommand(engine, 'uci');
+      sendCommand(engine, 'ucinewgame');
+      sendCommand(engine, 'position fen ' + fen);
+      sendCommand(engine, 'go depth ' + depth);
+    } catch {
       try {
-        // @ts-ignore
-        engine.send('uci');
-        // @ts-ignore
-        engine.send('ucinewgame');
-        // @ts-ignore
-        engine.send('position fen ' + fen);
-        // @ts-ignore
-        engine.send('go depth ' + depth);
-      } catch (e) {
+        sendCommand(engine, 'uci');
+        sendCommand(engine, 'ucinewgame');
+        sendCommand(engine, 'position fen ' + fen);
+        sendCommand(engine, 'go depth ' + depth);
+      } catch {
         if (!resolved) {
           resolved = true;
           resolve(result);
@@ -124,9 +170,9 @@ export async function evaluateFenWithWasm(engine: StockfishWorker, fen: string, 
       if (!resolved) {
         resolved = true;
         try {
-          engine.postMessage('stop');
-          engine.onmessage = null;
-        } catch (_) {}
+          sendCommand(engine, 'stop');
+          attachListener(engine, () => {});
+        } catch {}
         resolve(result);
       }
     }, timeout);
