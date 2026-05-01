@@ -18,8 +18,9 @@ type StockfishGlobal = Window & {
   stockfish?: StockfishFactory;
 };
 
-const DEFAULT_STOCKFISH_URL = '/stockfish/stockfish-18-lite-single.js';
-const DEFAULT_STOCKFISH_WASM_URL = '/stockfish/stockfish-18-lite-single.wasm';
+const DEFAULT_STOCKFISH_ASSET_VERSION = '18.0.7';
+const DEFAULT_STOCKFISH_URL = `/stockfish/stockfish-18-lite-single.js?v=${DEFAULT_STOCKFISH_ASSET_VERSION}`;
+const DEFAULT_STOCKFISH_WASM_URL = `/stockfish/stockfish-18-lite-single.wasm?v=${DEFAULT_STOCKFISH_ASSET_VERSION}`;
 
 async function createFromGlobal(): Promise<StockfishWorker> {
   const stockfishWindow = window as StockfishGlobal;
