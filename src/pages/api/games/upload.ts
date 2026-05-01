@@ -45,6 +45,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       date: meta.date ? new Date(meta.date) : new Date(),
       opponent: meta.opponent,
       opening: detectedOpening !== 'Unknown Opening' ? detectedOpening : undefined,
+      analysisStatus: 'pending',
+      analysisComplete: false,
     };
 
     // Insert game

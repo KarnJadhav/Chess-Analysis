@@ -268,28 +268,28 @@ export default function Dashboard() {
     }
     setMessage('Game uploaded and analysis started!');
     setAnalyzing(true);
+    const uploadedGameId = typeof data.gameId === 'string' ? data.gameId : undefined;
     // Poll for analysis completion
-    let pollCount = 0;
     const pollAnalysis = async () => {
-      pollCount++;
       const gamesRes = await fetch('/api/games/list?analysis=true', { credentials: 'include' });
       const gamesData = await gamesRes.json();
-      const latestGame = gamesData.games && gamesData.games[0];
-      if (latestGame && latestGame.analysisComplete) {
+      const trackedGame = uploadedGameId
+        ? (gamesData.games || []).find((game: Game) => game._id === uploadedGameId)
+        : gamesData.games && gamesData.games[0];
+
+      if (trackedGame && trackedGame.analysisComplete) {
         setAnalyzing(false);
         setGames(gamesData.games);
         setMessage('Analysis complete! Suggestions updated.');
-      } else if (latestGame && latestGame.analysisStatus === 'failed') {
+      } else if (trackedGame && trackedGame.analysisStatus === 'failed') {
         setAnalyzing(false);
         setGames(gamesData.games);
         setMessage(
-          `Analysis failed: ${latestGame.analysisError || 'Stockfish engine unavailable. Check STOCKFISH_PATH.'}`
+          `Analysis failed: ${trackedGame.analysisError || 'Stockfish engine unavailable. Check STOCKFISH_PATH.'}`
         );
-      } else if (pollCount < 30) {
-        setTimeout(pollAnalysis, 2000);
       } else {
-        setAnalyzing(false);
-        setMessage('Analysis timed out. Try again or check your game later.');
+        setGames(gamesData.games);
+        setTimeout(pollAnalysis, 4000);
       }
     };
     pollAnalysis();
