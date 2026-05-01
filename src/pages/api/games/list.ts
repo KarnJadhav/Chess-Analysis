@@ -4,6 +4,22 @@ import { requireAuth } from '@/lib/sessionUtils';
 import { Game } from '@/models/Game';
 import { ObjectId } from 'mongodb';
 
+function toObjectId(id: unknown): ObjectId | null {
+  if (id instanceof ObjectId) return id;
+  if (typeof id === 'string' && ObjectId.isValid(id)) return new ObjectId(id);
+  if (id && typeof id === 'object' && 'toString' in id) {
+    const idStr = (id as { toString: () => string }).toString();
+    if (ObjectId.isValid(idStr)) return new ObjectId(idStr);
+  }
+  return null;
+}
+
+function getDocumentCreatedAtMs(game: Game): number | null {
+  const oid = toObjectId(game._id as unknown);
+  if (!oid) return null;
+  return oid.getTimestamp().getTime();
+}
+
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -46,10 +62,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
     for (const game of games) {
       if (game.analysisComplete || game.analysisStatus !== 'pending') continue;
-      const createdAt = game.date instanceof Date ? game.date.getTime() : new Date(game.date).getTime();
+      const createdAt = getDocumentCreatedAtMs(game);
       if (!Number.isFinite(createdAt)) continue;
-      if (now - createdAt > maxPendingMs && game._id) {
-        stalePendingIds.push(new ObjectId(game._id));
+      if (createdAt !== null && now - createdAt > maxPendingMs) {
+        const oid = toObjectId(game._id as unknown);
+        if (!oid) continue;
+        stalePendingIds.push(oid);
         game.analysisStatus = 'failed';
         game.analysisError = 'Analysis timed out on server. Please try uploading again.';
       }
