@@ -10,6 +10,7 @@ export interface Game {
   analysis?: {
     acpl?: number;
     blunders?: unknown[];
+    misses?: unknown[];
     suggestions?: string[];
     endgameReached?: boolean;
     accuracy?: number;
@@ -23,16 +24,17 @@ export interface Game {
       evalBefore: number;
       evalAfter: number;
       bestMove: string;
-      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
       evalDrop: number;
       side: 'white' | 'black';
       phase: 'opening' | 'middlegame' | 'endgame';
       comment: string;
+      aiComment?: string;
     }[];
     timeline?: {
       move: number;
       eval: number;
-      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
     }[];
     playerSummary?: {
       white: {
@@ -40,6 +42,7 @@ export interface Game {
         blunders: number;
         mistakes: number;
         inaccuracies: number;
+        misses: number;
         bestMoves: number;
         greatMoves: number;
         brilliantMoves: number;
@@ -49,10 +52,16 @@ export interface Game {
         blunders: number;
         mistakes: number;
         inaccuracies: number;
+        misses: number;
         bestMoves: number;
         greatMoves: number;
         brilliantMoves: number;
       };
+    };
+    reviewSummary?: {
+      opening: string;
+      middlegame: string;
+      endgame: string;
     };
     estimatedRating?: {
       white: number;
@@ -67,16 +76,17 @@ export interface Game {
         evalBefore: number;
         evalAfter: number;
         bestMove: string;
-        classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+        classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
         evalDrop: number;
         side: 'white' | 'black';
         phase: 'opening' | 'middlegame' | 'endgame';
         comment: string;
+        aiComment?: string;
       }[];
       timeline: {
         move: number;
         eval: number;
-        classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+        classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
       }[];
       playerSummary: {
         white: {
@@ -84,6 +94,7 @@ export interface Game {
           blunders: number;
           mistakes: number;
           inaccuracies: number;
+          misses: number;
           bestMoves: number;
           greatMoves: number;
           brilliantMoves: number;
@@ -93,6 +104,7 @@ export interface Game {
           blunders: number;
           mistakes: number;
           inaccuracies: number;
+          misses: number;
           bestMoves: number;
           greatMoves: number;
           brilliantMoves: number;
@@ -102,7 +114,22 @@ export interface Game {
         white: number;
         black: number;
       };
+      reviewSummary?: {
+        opening: string;
+        middlegame: string;
+        endgame: string;
+      };
     };
+    aiReview?: {
+      summary: string;
+      strengths: string[];
+      weaknesses: string[];
+      turningPoints: string[];
+      improvementSuggestions: string[];
+      coachMessage?: string;
+    };
+    aiReviewStatus?: string;
+    aiReviewError?: string;
     [key: string]: unknown;
   };
   analysisStatus?: string;

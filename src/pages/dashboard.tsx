@@ -23,12 +23,13 @@ type SelectedGameAnalysis = {
   timeline?: {
     move: number;
     eval: number;
-    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
   }[];
   criticalPositions?: {
     moveNumber: number;
     classification?: 'blunder' | 'mistake' | 'inaccuracy' | string;
   }[];
+  misses?: number[];
   reviewedMoves?: {
     moveNumber: number;
     san: string;
@@ -38,15 +39,22 @@ type SelectedGameAnalysis = {
     evalDrop: number;
     side: 'white' | 'black';
     phase: 'opening' | 'middlegame' | 'endgame';
-    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+    classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
     comment: string;
+    aiComment?: string;
   }[];
+  reviewSummary?: {
+    opening: string;
+    middlegame: string;
+    endgame: string;
+  };
   playerSummary?: {
     white: {
       accuracy: number;
       blunders: number;
       mistakes: number;
       inaccuracies: number;
+      misses: number;
       bestMoves: number;
       greatMoves: number;
       brilliantMoves: number;
@@ -56,6 +64,7 @@ type SelectedGameAnalysis = {
       blunders: number;
       mistakes: number;
       inaccuracies: number;
+      misses: number;
       bestMoves: number;
       greatMoves: number;
       brilliantMoves: number;
@@ -69,7 +78,7 @@ type SelectedGameAnalysis = {
     timeline?: {
       move: number;
       eval: number;
-      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
     }[];
     reviewedMoves?: {
       moveNumber: number;
@@ -80,15 +89,22 @@ type SelectedGameAnalysis = {
       evalDrop: number;
       side: 'white' | 'black';
       phase: 'opening' | 'middlegame' | 'endgame';
-      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+      classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
       comment: string;
+      aiComment?: string;
     }[];
+    reviewSummary?: {
+      opening: string;
+      middlegame: string;
+      endgame: string;
+    };
     playerSummary?: {
       white: {
         accuracy: number;
         blunders: number;
         mistakes: number;
         inaccuracies: number;
+        misses: number;
         bestMoves: number;
         greatMoves: number;
         brilliantMoves: number;
@@ -98,6 +114,7 @@ type SelectedGameAnalysis = {
         blunders: number;
         mistakes: number;
         inaccuracies: number;
+        misses: number;
         bestMoves: number;
         greatMoves: number;
         brilliantMoves: number;
@@ -108,6 +125,16 @@ type SelectedGameAnalysis = {
       black: number;
     };
   };
+  aiReview?: {
+    summary: string;
+    strengths: string[];
+    weaknesses: string[];
+    turningPoints: string[];
+    improvementSuggestions: string[];
+    coachMessage?: string;
+  };
+  aiReviewStatus?: string;
+  aiReviewError?: string;
 };
 
 function normalizeEvalCpToPawns(evalCp: number): number {
@@ -124,11 +151,41 @@ function getPieceUnicode(piece: { type: string; color: 'w' | 'b' }): string {
   return map[key] || '';
 }
 
+function uciToSan(chess: Chess, uci: string): string {
+  if (!uci || uci.length < 4) return '';
+  try {
+    const move = chess.move({
+      from: uci.slice(0, 2),
+      to: uci.slice(2, 4),
+      promotion: uci.length >= 5 ? uci[4] : undefined,
+    });
+    const san = move?.san || '';
+    chess.undo();
+    return san;
+  } catch {
+    return '';
+  }
+}
+
 type ViewerMove = {
   from: string;
   to: string;
   san: string;
 };
+type ChessComProfile = {
+  username: string;
+  avatar?: string | null;
+  country?: string | null;
+  title?: string | null;
+  ratings?: {
+    rapid?: number | null;
+    blitz?: number | null;
+    bullet?: number | null;
+  };
+};
+function normalizeChessComUsername(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, '');
+}
 
 const classificationColors: Record<string, string> = {
   brilliant: '#20c997',
@@ -138,6 +195,7 @@ const classificationColors: Record<string, string> = {
   good: '#0dcaf0',
   inaccuracy: '#ffc107',
   mistake: '#fd7e14',
+  miss: '#f59f00',
   blunder: '#dc3545',
 };
 
@@ -149,17 +207,73 @@ const classificationIcons: Record<string, string> = {
   good: '·',
   inaccuracy: '?!',
   mistake: '?',
+  miss: 'x',
   blunder: '??',
 };
 
-type MoveClassification = 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'blunder';
+type MoveClassification = 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
 
-function classifyDrop(drop: number): MoveClassification {
-  if (drop >= 200) return 'blunder';
-  if (drop >= 90) return 'mistake';
-  if (drop >= 45) return 'inaccuracy';
-  if (drop <= 5) return 'best';
-  return 'good';
+function isBrilliantMove(evalBefore: number, evalAfter: number, drop: number, side: 'white' | 'black'): boolean {
+  const evalBeforeSide = side === 'white' ? evalBefore : -evalBefore;
+  const evalAfterSide = side === 'white' ? evalAfter : -evalAfter;
+  const improvement = evalAfterSide - evalBeforeSide;
+  return drop < 20 && improvement > 200 && evalBeforeSide < 100 && evalAfterSide > 300;
+}
+
+function classifyMove(
+  drop: number,
+  evalBefore: number,
+  evalAfter: number,
+  side: 'white' | 'black',
+  isBest: boolean
+): MoveClassification {
+  const evalBeforeSide = side === 'white' ? evalBefore : -evalBefore;
+  const evalAfterSide = side === 'white' ? evalAfter : -evalAfter;
+
+  if (evalAfterSide <= -25000) return 'blunder';
+
+  // Missed a winning continuation.
+  if (evalBeforeSide >= 200 && evalAfterSide <= 100 && !isBest) return 'miss';
+
+  if (drop >= 300) return 'blunder';
+  if (drop >= 150) return 'mistake';
+  if (drop >= 80) return evalBeforeSide >= 200 ? 'mistake' : 'miss';
+
+  if (isBrilliantMove(evalBefore, evalAfter, drop, side)) return 'brilliant';
+
+  if (evalBeforeSide > 800 && evalAfterSide < 200) return 'miss';
+
+  if (isBest && drop < 10) return 'best';
+  if (drop < 40) return 'excellent';
+  if (drop < 90) return 'good';
+  if (drop < 200) return 'inaccuracy';
+  if (drop < 400) return 'mistake';
+  return 'blunder';
+}
+
+function getClassificationLabel(classification: MoveClassification): string {
+  switch (classification) {
+    case 'brilliant':
+      return 'Brilliant';
+    case 'great':
+      return 'Great';
+    case 'best':
+      return 'Best';
+    case 'excellent':
+      return 'Excellent';
+    case 'good':
+      return 'Good';
+    case 'inaccuracy':
+      return 'Inaccuracy';
+    case 'mistake':
+      return 'Mistake';
+    case 'miss':
+      return 'Miss';
+    case 'blunder':
+      return 'Blunder';
+    default:
+      return classification;
+  }
 }
 
 function calcAccuracyFromAcpl(acpl: number): number {
@@ -223,6 +337,11 @@ async function analyzePgnInBrowser(
   pgn: string,
   onProgress?: (done: number, total: number) => void
 ) {
+  const quickDepth = 12;
+  const deepDepth = 20;
+  const quickTimeout = 6000;
+  const deepTimeout = 10000;
+
   const chess = new Chess();
   chess.loadPgn(pgn);
   const verboseMoves = chess.history({ verbose: true });
@@ -253,7 +372,7 @@ async function analyzePgnInBrowser(
     const positions = fens.map((fen, index) => ({ fen, sideToMove: sideToMove[index] }));
 
     // Fast scan: low depth across all positions, parallelized across a small engine pool.
-    const quickPass = await evaluatePositionsWithPool(positions, engines, 6, 1200, onProgress);
+    const quickPass = await evaluatePositionsWithPool(positions, engines, quickDepth, quickTimeout, onProgress);
 
     const criticalIndices = new Set<number>();
     for (let i = 0; i < sans.length; i++) {
@@ -273,7 +392,7 @@ async function analyzePgnInBrowser(
       .sort((left, right) => left - right)
       .map((index) => positions[index]);
     const refinedEvals = refinedPositions.length > 0
-      ? await evaluatePositionsWithPool(refinedPositions, engines, 10, 2200)
+      ? await evaluatePositionsWithPool(refinedPositions, engines, deepDepth, deepTimeout)
       : [];
 
     const refinedByFen = new Map<string, EngineEval>();
@@ -307,18 +426,25 @@ async function analyzePgnInBrowser(
     const blunders: number[] = [];
     const mistakes: number[] = [];
     const inaccuracies: number[] = [];
+    const misses: number[] = [];
 
     let whiteDropSum = 0;
     let blackDropSum = 0;
     let whiteMoves = 0;
     let blackMoves = 0;
 
+    const chessBefore = new Chess();
+    chessBefore.loadPgn(pgn);
+    chessBefore.reset();
+
     for (let i = 0; i < sans.length; i++) {
       const side = i % 2 === 0 ? 'white' : 'black';
       const evalBefore = positionEvals[i].cp;
       const evalAfter = positionEvals[i + 1].cp;
       const evalDrop = side === 'white' ? Math.max(0, evalBefore - evalAfter) : Math.max(0, evalAfter - evalBefore);
-      const classification = classifyDrop(evalDrop);
+      const bestMoveSan = uciToSan(chessBefore, positionEvals[i].bestMove || '');
+      const isBest = bestMoveSan !== '' && bestMoveSan === sans[i];
+      const classification = classifyMove(evalDrop, evalBefore, evalAfter, side, isBest);
 
       if (side === 'white') {
         whiteDropSum += evalDrop;
@@ -331,7 +457,8 @@ async function analyzePgnInBrowser(
       if (classification === 'blunder') blunders.push(i + 1);
       if (classification === 'mistake') mistakes.push(i + 1);
       if (classification === 'inaccuracy') inaccuracies.push(i + 1);
-      if (classification === 'blunder' || classification === 'mistake' || classification === 'inaccuracy') {
+      if (classification === 'miss') misses.push(i + 1);
+      if (classification === 'blunder' || classification === 'mistake' || classification === 'inaccuracy' || classification === 'miss') {
         criticalPositions.push({ moveNumber: i + 1, classification });
       }
 
@@ -340,7 +467,7 @@ async function analyzePgnInBrowser(
       reviewedMoves.push({
         moveNumber: i + 1,
         san: sans[i],
-        bestMove: positionEvals[i].bestMove || 'N/A',
+        bestMove: bestMoveSan || positionEvals[i].bestMove || 'N/A',
         evalBefore,
         evalAfter,
         evalDrop,
@@ -351,10 +478,16 @@ async function analyzePgnInBrowser(
           classification === 'blunder'
             ? 'Large evaluation swing after this move.'
             : classification === 'mistake'
-              ? 'Significant inaccuracy that cost advantage.'
-              : classification === 'inaccuracy'
-                ? 'Small but meaningful loss of position value.'
-                : 'Solid move with limited loss.',
+              ? 'Significant error that cost advantage.'
+              : classification === 'miss'
+                ? 'You missed a stronger continuation here.'
+                : classification === 'inaccuracy'
+                  ? 'Small but meaningful loss of position value.'
+                  : classification === 'brilliant'
+                    ? 'Creative and strong move that improves the position.'
+                    : classification === 'great'
+                      ? 'Strong move that keeps or increases advantage.'
+                      : 'Solid move with limited loss.',
       });
 
       timeline.push({
@@ -362,12 +495,18 @@ async function analyzePgnInBrowser(
         eval: evalAfter,
         classification,
       });
+
+      try {
+        chessBefore.move(sans[i]);
+      } catch {
+        // ignore SAN sync issues
+      }
     }
 
     const whiteAcpl = whiteMoves > 0 ? Math.round(whiteDropSum / whiteMoves) : 0;
     const blackAcpl = blackMoves > 0 ? Math.round(blackDropSum / blackMoves) : 0;
-    const accuracyWhite = calcAccuracyFromAcpl(whiteAcpl);
-    const accuracyBlack = calcAccuracyFromAcpl(blackAcpl);
+    const accuracyWhite = calcAccuracyFromAcpl(Math.max(10, whiteAcpl));
+    const accuracyBlack = calcAccuracyFromAcpl(Math.max(10, blackAcpl));
     const accuracy = Math.round((accuracyWhite + accuracyBlack) / 2);
 
     const playerSummary = {
@@ -376,25 +515,53 @@ async function analyzePgnInBrowser(
         blunders: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'blunder').length,
         mistakes: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'mistake').length,
         inaccuracies: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'inaccuracy').length,
+        misses: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'miss').length,
         bestMoves: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'best').length,
-        greatMoves: 0,
-        brilliantMoves: 0,
+        greatMoves: reviewedMoves.filter((m) => m.side === 'white' && (m.classification === 'great' || m.classification === 'excellent')).length,
+        brilliantMoves: reviewedMoves.filter((m) => m.side === 'white' && m.classification === 'brilliant').length,
       },
       black: {
         accuracy: accuracyBlack,
         blunders: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'blunder').length,
         mistakes: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'mistake').length,
         inaccuracies: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'inaccuracy').length,
+        misses: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'miss').length,
         bestMoves: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'best').length,
-        greatMoves: 0,
-        brilliantMoves: 0,
+        greatMoves: reviewedMoves.filter((m) => m.side === 'black' && (m.classification === 'great' || m.classification === 'excellent')).length,
+        brilliantMoves: reviewedMoves.filter((m) => m.side === 'black' && m.classification === 'brilliant').length,
       },
+    };
+
+    const phaseSummary = {
+      opening: reviewedMoves.filter((m) => m.phase === 'opening'),
+      middlegame: reviewedMoves.filter((m) => m.phase === 'middlegame'),
+      endgame: reviewedMoves.filter((m) => m.phase === 'endgame'),
+    };
+
+    const describePhase = (phaseMoves: typeof reviewedMoves): string => {
+      if (phaseMoves.length === 0) return 'N/A';
+      const blundersInPhase = phaseMoves.filter((m) => m.classification === 'blunder').length;
+      const mistakesInPhase = phaseMoves.filter((m) => m.classification === 'mistake' || m.classification === 'miss').length;
+      const brilliantInPhase = phaseMoves.filter((m) => m.classification === 'brilliant').length;
+      const greatInPhase = phaseMoves.filter((m) => m.classification === 'great').length;
+
+      if (blundersInPhase > 0) return 'Needs work';
+      if (mistakesInPhase > 1) return 'Unstable';
+      if (brilliantInPhase > 0 || greatInPhase > 1) return 'Strong';
+      return 'Solid';
+    };
+
+    const reviewSummary = {
+      opening: describePhase(phaseSummary.opening),
+      middlegame: describePhase(phaseSummary.middlegame),
+      endgame: describePhase(phaseSummary.endgame),
     };
 
     const suggestions: string[] = [];
     if (blunders.length > 0) suggestions.push(`Reduce blunders (${blunders.length}) by checking tactical threats before moving.`);
     if (mistakes.length > 0) suggestions.push(`Review strategic decisions around mistake moves (${mistakes.length}).`);
     if (inaccuracies.length > 0) suggestions.push(`Improve precision in calm positions (${inaccuracies.length} inaccuracies).`);
+    if (misses.length > 0) suggestions.push(`Look for tactical chances (${misses.length} missed opportunities).`);
     if (suggestions.length === 0) suggestions.push('Strong game quality. Keep reviewing move consistency.');
 
     return {
@@ -406,9 +573,11 @@ async function analyzePgnInBrowser(
       blunders,
       mistakes,
       inaccuracies,
+      misses,
       criticalPositions,
       reviewedMoves,
       timeline,
+      reviewSummary,
       playerSummary,
       estimatedRating: {
         white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
@@ -418,6 +587,7 @@ async function analyzePgnInBrowser(
       review: {
         timeline,
         reviewedMoves,
+        reviewSummary,
         playerSummary,
         estimatedRating: {
           white: Math.max(600, Math.min(2900, Math.round(600 + accuracyWhite * 20))),
@@ -457,6 +627,13 @@ export default function Dashboard() {
   const [isFlipped, setIsFlipped] = useState(false);
   const [moveIndex, setMoveIndex] = useState(0);
   const [moves, setMoves] = useState<ViewerMove[]>([]);
+  const [regeneratingAi, setRegeneratingAi] = useState(false);
+  const movesListRef = useRef<HTMLDivElement>(null);
+  const [whiteProfile, setWhiteProfile] = useState<ChessComProfile | null>(null);
+  const [blackProfile, setBlackProfile] = useState<ChessComProfile | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const whiteName = session?.user?.name || session?.user?.email || 'White';
+  const blackName = selectedGame?.opponent || 'Black';
 
   // Profile dropdown logic
   useEffect(() => {
@@ -531,6 +708,62 @@ export default function Dashboard() {
     if (session) fetchGames();
   }, [session, search, dateFilter, resultFilter]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function fetchProfiles() {
+      if (!viewerOpen || !selectedGame) return;
+      setProfileError(null);
+
+      const whiteHandle = normalizeChessComUsername(whiteName);
+      const blackHandle = normalizeChessComUsername(blackName);
+
+      if (!whiteHandle && !blackHandle) {
+        setWhiteProfile(null);
+        setBlackProfile(null);
+        return;
+      }
+
+      try {
+        const [whiteRes, blackRes] = await Promise.all([
+          whiteHandle ? fetch(`/api/chesscom/profile?username=${encodeURIComponent(whiteHandle)}`) : Promise.resolve(null),
+          blackHandle ? fetch(`/api/chesscom/profile?username=${encodeURIComponent(blackHandle)}`) : Promise.resolve(null),
+        ]);
+
+        const whiteData = whiteRes ? await whiteRes.json() : null;
+        const blackData = blackRes ? await blackRes.json() : null;
+
+        if (cancelled) return;
+
+        setWhiteProfile(whiteData?.error ? null : whiteData);
+        setBlackProfile(blackData?.error ? null : blackData);
+
+        if ((whiteData && whiteData.error) || (blackData && blackData.error)) {
+          setProfileError('Chess.com profile not found for one or more players.');
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setProfileError('Failed to load Chess.com profiles.');
+        }
+      }
+    }
+
+    fetchProfiles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [viewerOpen, selectedGame, whiteName, blackName]);
+
+  useEffect(() => {
+    const container = movesListRef.current;
+    if (!container || moveIndex === 0) return;
+    const active = container.querySelector(`[data-move-index="${moveIndex}"]`);
+    if (active && active instanceof HTMLElement) {
+      active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }, [moveIndex, viewerOpen]);
+
   if (!session) {
     return <div className="d-flex align-items-center justify-content-center min-vh-100 bg-primary text-white fw-bold fs-4">You must be signed in to view this page.</div>;
   }
@@ -566,7 +799,7 @@ export default function Dashboard() {
         setMessage(`Analyzing with Stockfish (${done}/${total} positions)...`);
       });
 
-      const saveRes = await fetch('/api/games/analysis', {
+      const saveRes = await fetch(`/api/games/analysis?gameId=${encodeURIComponent(uploadedGameId)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -600,6 +833,13 @@ export default function Dashboard() {
   const reviewedMoves = selectedAnalysis?.review?.reviewedMoves ?? selectedAnalysis?.reviewedMoves ?? [];
   const playerSummary = selectedAnalysis?.review?.playerSummary ?? selectedAnalysis?.playerSummary;
   const estimatedRating = selectedAnalysis?.review?.estimatedRating ?? selectedAnalysis?.estimatedRating;
+  const reviewSummary = selectedAnalysis?.review?.reviewSummary ?? selectedAnalysis?.reviewSummary;
+
+  const criticalMoveSet = new Set(
+    reviewedMoves
+      .filter((move) => ['blunder', 'mistake', 'miss'].includes(move.classification) || move.evalDrop >= 200)
+      .map((move) => move.moveNumber)
+  );
 
   const chartData = reviewTimeline.length > 0
     ? reviewTimeline.map((point) => ({
@@ -607,17 +847,37 @@ export default function Dashboard() {
       eval: normalizeEvalCpToPawns(point.eval),
       classification: point.classification,
       dotColor: classificationColors[point.classification] ?? '#0d6efd',
+      isCritical: criticalMoveSet.has(point.move),
     }))
     : (selectedAnalysis?.moveEvals ?? []).map((evalScore, index) => ({
       move: index + 1,
       eval: normalizeEvalCpToPawns(evalScore),
       classification: 'good',
       dotColor: classificationColors.good,
+      isCritical: criticalMoveSet.has(index + 1),
     }));
 
   const activeReviewedMove = moveIndex > 0 ? reviewedMoves[moveIndex - 1] : undefined;
-  const whiteName = session?.user?.name || session?.user?.email || 'White';
-  const blackName = selectedGame?.opponent || 'Black';
+  const turningPoint = reviewedMoves
+    .slice()
+    .sort((left, right) => right.evalDrop - left.evalDrop)[0];
+  const aiReview = selectedAnalysis?.aiReview;
+  const aiReviewStatus = selectedAnalysis?.aiReviewStatus;
+  const aiReviewError = selectedAnalysis?.aiReviewError;
+  const aiReviewMessage = (() => {
+    if (!aiReviewError) return null;
+    const normalized = aiReviewError.toLowerCase();
+    if (normalized.includes('status code 402') || normalized.includes(' 402')) {
+      return 'AI review unavailable: OpenRouter credits or model access required.';
+    }
+    if (normalized.includes('status code 404') || normalized.includes(' 404')) {
+      return 'AI review unavailable: model not found. Check OPENROUTER_MODELS.';
+    }
+    return null;
+  })();
+
+  const latestAiReviewGame = games.find((game: Game) => (game.analysis as SelectedGameAnalysis | undefined)?.aiReview);
+  const latestAiReview = (latestAiReviewGame?.analysis as SelectedGameAnalysis | undefined)?.aiReview;
 
   function initialsFromName(name: string): string {
     const chunks = name.split(/\s+/).filter(Boolean);
@@ -672,6 +932,16 @@ export default function Dashboard() {
 
   const lastMove = moveIndex > 0 ? moves[moveIndex - 1] : null;
 
+  function findNextCriticalMove(currentIndex: number): number | null {
+    for (let i = currentIndex; i < reviewedMoves.length; i++) {
+      const classification = reviewedMoves[i]?.classification;
+      if (classification === 'blunder' || classification === 'mistake' || classification === 'miss' || classification === 'inaccuracy') {
+        return i + 1;
+      }
+    }
+    return null;
+  }
+
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) {
@@ -704,6 +974,36 @@ export default function Dashboard() {
         setPgn(ev.target?.result as string);
       };
       reader.readAsText(file);
+    }
+  }
+
+  async function handleRegenerateAi() {
+    if (!selectedGame?._id) return;
+    setRegeneratingAi(true);
+    try {
+      const response = await fetch(`/api/games/analysis?gameId=${encodeURIComponent(selectedGame._id)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({ gameId: selectedGame._id, generateAi: true, forceAi: true, useStoredAnalysis: true }),
+        }
+      );
+      const data = await response.json();
+      if (data.error) {
+        throw new Error(data.error);
+      }
+      const gamesRes = await fetch('/api/games/list?analysis=true', { credentials: 'include' });
+      const gamesData = await gamesRes.json();
+      setGames(gamesData.games || []);
+      const updated = (gamesData.games || []).find((g: Game) => g._id === selectedGame._id) || null;
+      if (updated) {
+        setSelectedGame(updated);
+      }
+    } catch (err) {
+      console.error('Failed to regenerate AI review:', err);
+    } finally {
+      setRegeneratingAi(false);
     }
   }
 
@@ -911,36 +1211,139 @@ export default function Dashboard() {
                             <div className="mb-2 fw-semibold">Date: {selectedGame.date ? new Date(selectedGame.date).toLocaleDateString() : ''}</div>
                           </div>
 
+                          <div className="bg-dark text-white rounded-3 p-3 mb-3">
+                            <div className="fw-semibold mb-2">AI Coach Summary</div>
+                            {aiReview ? (
+                              <>
+                                {aiReview.coachMessage && (
+                                  <div className="mb-2">{aiReview.coachMessage}</div>
+                                )}
+                                <div className="small">{aiReview.summary}</div>
+                                {aiReview.improvementSuggestions?.length > 0 && (
+                                  <ul className="small mt-2 mb-0">
+                                    {aiReview.improvementSuggestions.slice(0, 3).map((tip, idx) => (
+                                      <li key={idx}>{tip}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                              </>
+                            ) : aiReviewStatus === 'failed' ? (
+                              <div className="small text-warning">{aiReviewMessage || `AI review failed: ${aiReviewError || 'Unknown error'}`}</div>
+                            ) : aiReviewStatus === 'skipped' ? (
+                              <div className="small text-white-50">AI review skipped (missing API key).</div>
+                            ) : (
+                              <div className="small text-white-50">AI review unavailable. Add OpenRouter credits and click Regenerate.</div>
+                            )}
+                            <button
+                              type="button"
+                              className="btn btn-outline-light btn-sm mt-2"
+                              onClick={handleRegenerateAi}
+                              disabled={regeneratingAi}
+                            >
+                              {regeneratingAi ? 'Regenerating...' : 'Regenerate AI Review'}
+                            </button>
+                          </div>
+
                           <div className="review-summary bg-light rounded-3 p-3 border">
                             <div className="fw-semibold mb-2">Game Review</div>
+                            {profileError && (
+                              <div className="small text-warning mb-2">{profileError}</div>
+                            )}
                             <div className="d-flex justify-content-between align-items-center mb-2">
                               <div className="d-flex align-items-center gap-2">
-                                <div className="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
-                                  {initialsFromName(whiteName)}
-                                </div>
+                                {whiteProfile?.avatar ? (
+                                  <img
+                                    src={whiteProfile.avatar}
+                                    alt={whiteProfile.username}
+                                    width={32}
+                                    height={32}
+                                    style={{ borderRadius: '50%', objectFit: 'cover' }}
+                                  />
+                                ) : (
+                                  <div className="rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
+                                    {initialsFromName(whiteName)}
+                                  </div>
+                                )}
                                 <div>
-                                  <div className="fw-semibold">{whiteName}</div>
+                                  <div className="fw-semibold">
+                                    {whiteProfile?.title ? `${whiteProfile.title} ` : ''}{whiteName}
+                                  </div>
                                   <div className="small text-muted">White</div>
                                 </div>
                               </div>
                               <div className="text-end">
                                 <div className="fw-bold text-success">{playerSummary?.white.accuracy ?? selectedAnalysis?.accuracyWhite ?? '-'}%</div>
-                                <div className="small text-muted">Rating: {estimatedRating?.white ?? '-'}</div>
+                                <div className="small text-muted">
+                                  Rating: {whiteProfile?.ratings?.rapid ?? estimatedRating?.white ?? '-'}
+                                </div>
                               </div>
                             </div>
                             <div className="d-flex justify-content-between align-items-center">
                               <div className="d-flex align-items-center gap-2">
-                                <div className="rounded-circle bg-dark text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
-                                  {initialsFromName(blackName)}
-                                </div>
+                                {blackProfile?.avatar ? (
+                                  <img
+                                    src={blackProfile.avatar}
+                                    alt={blackProfile.username}
+                                    width={32}
+                                    height={32}
+                                    style={{ borderRadius: '50%', objectFit: 'cover' }}
+                                  />
+                                ) : (
+                                  <div className="rounded-circle bg-dark text-white d-flex align-items-center justify-content-center" style={{ width: 32, height: 32 }}>
+                                    {initialsFromName(blackName)}
+                                  </div>
+                                )}
                                 <div>
-                                  <div className="fw-semibold">{blackName}</div>
+                                  <div className="fw-semibold">
+                                    {blackProfile?.title ? `${blackProfile.title} ` : ''}{blackName}
+                                  </div>
                                   <div className="small text-muted">Black</div>
                                 </div>
                               </div>
                               <div className="text-end">
                                 <div className="fw-bold text-success">{playerSummary?.black.accuracy ?? selectedAnalysis?.accuracyBlack ?? '-'}%</div>
-                                <div className="small text-muted">Rating: {estimatedRating?.black ?? '-'}</div>
+                                <div className="small text-muted">
+                                  Rating: {blackProfile?.ratings?.rapid ?? estimatedRating?.black ?? '-'}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mt-3">
+                              <div className="fw-semibold mb-2">Move Classifications</div>
+                              <div className="d-flex justify-content-between small fw-semibold">
+                                <span>Type</span>
+                                <span>{whiteName}</span>
+                                <span>{blackName}</span>
+                              </div>
+                              {[
+                                { label: 'Brilliant', key: 'brilliantMoves', icon: classificationIcons.brilliant, color: classificationColors.brilliant },
+                                { label: 'Great', key: 'greatMoves', icon: classificationIcons.great, color: classificationColors.great },
+                                { label: 'Best', key: 'bestMoves', icon: classificationIcons.best, color: classificationColors.best },
+                                { label: 'Miss', key: 'misses', icon: classificationIcons.miss, color: classificationColors.miss },
+                                { label: 'Mistake', key: 'mistakes', icon: classificationIcons.mistake, color: classificationColors.mistake },
+                                { label: 'Blunder', key: 'blunders', icon: classificationIcons.blunder, color: classificationColors.blunder },
+                              ].map((row) => (
+                                <div key={row.key} className="d-flex justify-content-between align-items-center small">
+                                  <span style={{ color: row.color }}>{row.icon} {row.label}</span>
+                                  <span>{(playerSummary?.white as Record<string, number> | undefined)?.[row.key] ?? 0}</span>
+                                  <span>{(playerSummary?.black as Record<string, number> | undefined)?.[row.key] ?? 0}</span>
+                                </div>
+                              ))}
+                            </div>
+
+                            <div className="mt-3">
+                              <div className="fw-semibold mb-2">Phase Feedback</div>
+                              <div className="d-flex justify-content-between small">
+                                <span>Opening</span>
+                                <span>{reviewSummary?.opening ?? 'N/A'}</span>
+                              </div>
+                              <div className="d-flex justify-content-between small">
+                                <span>Middlegame</span>
+                                <span>{reviewSummary?.middlegame ?? 'N/A'}</span>
+                              </div>
+                              <div className="d-flex justify-content-between small">
+                                <span>Endgame</span>
+                                <span>{reviewSummary?.endgame ?? 'N/A'}</span>
                               </div>
                             </div>
                           </div>
@@ -951,12 +1354,22 @@ export default function Dashboard() {
                             <span className="fw-bold">Move {moveIndex} / {moves.length}</span>
                             <button className="btn btn-outline-secondary ms-2" disabled={moveIndex === moves.length} onClick={() => setMoveIndex(moveIndex + 1)}>▶️</button>
                             <button className="btn btn-outline-secondary ms-2" disabled={moveIndex === moves.length} onClick={() => setMoveIndex(moves.length)}>⏭️</button>
+                            <button
+                              className="btn btn-outline-danger ms-2 mt-2 mt-lg-0"
+                              onClick={() => {
+                                const next = findNextCriticalMove(moveIndex);
+                                if (next) setMoveIndex(next);
+                              }}
+                              disabled={reviewedMoves.length === 0}
+                            >
+                              Next Mistake
+                            </button>
                             <button className="btn btn-outline-primary ms-2 mt-2 mt-lg-0" onClick={() => setIsFlipped((v) => !v)}>
                               {isFlipped ? 'White View' : 'Black View'}
                             </button>
                           </div>
 
-                          <div className="moves-list">
+                          <div className="moves-list" ref={movesListRef}>
                             <ol className="mb-0">
                               {moves.map((move, idx) => {
                                 const moveNumber = Math.floor(idx / 2) + 1;
@@ -966,7 +1379,7 @@ export default function Dashboard() {
                                 const icon = classificationIcons[reviewMove?.classification ?? 'good'] ?? '·';
                                 const iconColor = classificationColors[reviewMove?.classification ?? 'good'] ?? '#0d6efd';
                                 return (
-                                  <li key={idx} className={idx === moveIndex - 1 ? 'fw-bold text-primary' : ''}>
+                                  <li key={idx} data-move-index={idx + 1} className={idx === moveIndex - 1 ? 'fw-bold text-primary' : ''}>
                                     <button
                                       type="button"
                                       className="btn btn-link p-0 text-decoration-none"
@@ -993,6 +1406,11 @@ export default function Dashboard() {
                                 </div>
                                 <div className="small text-muted mb-1">Best move: {activeReviewedMove.bestMove} | Eval drop: {activeReviewedMove.evalDrop} cp</div>
                                 <div className="small">{activeReviewedMove.comment}</div>
+                                {activeReviewedMove.aiComment && (
+                                  <div className="small mt-2">
+                                    <span className="fw-semibold">AI Coach:</span> {activeReviewedMove.aiComment}
+                                  </div>
+                                )}
                               </>
                             ) : (
                               <div className="small text-muted">Select a move to see review feedback.</div>
@@ -1087,6 +1505,19 @@ export default function Dashboard() {
                 <div className="col-12 col-md-4 mb-3">
                   <div className="bg-success bg-opacity-10 border border-success rounded-3 p-4 shadow-sm" style={{ minHeight: '200px' }}>
                     <h5 className="fw-bold text-success mb-3">💡 Suggestions</h5>
+                    {latestAiReview ? (
+                      <div className="mb-3">
+                        <div className="small fw-semibold text-dark">AI Coach</div>
+                        <div className="small text-muted">{latestAiReview.summary}</div>
+                        {latestAiReview.improvementSuggestions?.length > 0 && (
+                          <ul className="small mt-2 mb-0">
+                            {latestAiReview.improvementSuggestions.slice(0, 3).map((tip, idx) => (
+                              <li key={idx}>{tip}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ) : null}
                     <ul className="mb-0 text-dark" style={{ fontSize: '0.95rem', lineHeight: '1.6' }}>
                       {games.length === 0 ? (
                         <li className="text-muted">No suggestions yet.</li>
@@ -1114,21 +1545,6 @@ export default function Dashboard() {
                         ))
                       )}
                     </ul>
-                  </div>
-                </div>
-              </div>
-              {/* Chart placeholders for ACPL and blunders over time */}
-              <div className="row mt-4">
-                <div className="col-12 col-md-6 mb-3">
-                  <div className="bg-primary bg-opacity-5 border border-primary rounded-3 p-4 shadow-sm">
-                    <h5 className="fw-bold text-primary mb-3">📈 ACPL Over Time</h5>
-                    <div style={{ height: 200 }} className="d-flex align-items-center justify-content-center bg-white rounded-2 text-muted">[Chart Coming Soon]</div>
-                  </div>
-                </div>
-                <div className="col-12 col-md-6 mb-3">
-                  <div className="bg-danger bg-opacity-5 border border-danger rounded-3 p-4 shadow-sm">
-                    <h5 className="fw-bold text-danger mb-3">📉 Blunders Over Time</h5>
-                    <div style={{ height: 200 }} className="d-flex align-items-center justify-content-center bg-white rounded-2 text-muted">[Chart Coming Soon]</div>
                   </div>
                 </div>
               </div>
