@@ -8,7 +8,146 @@ body {
 	min-height: 100vh;
 	background-color: #0f172a; /* bg-slate-900 */
 	color: #e2e8f0; /* text-slate-200 */
-	font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji"; /* font-sans */
+	font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+.auth-shell {
+	min-height: 100vh;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 3rem 1.5rem;
+	background: radial-gradient(circle at top right, rgba(14, 165, 233, 0.2), transparent 45%),
+		radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.2), transparent 50%),
+		linear-gradient(160deg, #0f172a, #111827 55%, #0b1120);
+}
+
+.auth-card {
+	width: 100%;
+	background: rgba(15, 23, 42, 0.85);
+	border: 1px solid rgba(148, 163, 184, 0.25);
+	border-radius: 20px;
+	box-shadow: 0 30px 60px rgba(2, 6, 23, 0.5);
+	padding: 2.5rem;
+	color: #e2e8f0;
+	backdrop-filter: blur(14px);
+}
+
+.auth-brand {
+	text-transform: uppercase;
+	letter-spacing: 0.35em;
+	font-size: 0.7rem;
+	color: rgba(226, 232, 240, 0.65);
+	margin-bottom: 1rem;
+}
+
+.auth-title {
+	font-size: clamp(1.8rem, 3vw, 2.4rem);
+	font-weight: 700;
+	color: #f8fafc;
+	margin-bottom: 0.6rem;
+}
+
+.auth-subtitle {
+	color: rgba(226, 232, 240, 0.75);
+	margin-bottom: 1.8rem;
+}
+
+.auth-field {
+	display: grid;
+	gap: 0.5rem;
+	margin-bottom: 1.2rem;
+}
+
+.auth-label {
+	font-weight: 600;
+	color: #cbd5f5;
+}
+
+.auth-input {
+	border-radius: 12px;
+	border: 1px solid rgba(148, 163, 184, 0.35);
+	background: rgba(15, 23, 42, 0.6);
+	color: #f8fafc;
+	padding: 0.75rem 0.9rem;
+	font-size: 1rem;
+	transition: border 150ms ease, box-shadow 150ms ease;
+}
+
+.auth-input:focus {
+	outline: none;
+	border-color: #60a5fa;
+	box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
+}
+
+.auth-button {
+	width: 100%;
+	border: none;
+	border-radius: 999px;
+	padding: 0.85rem 1rem;
+	font-weight: 700;
+	background: linear-gradient(135deg, #38bdf8, #2563eb);
+	color: #0b1220;
+	box-shadow: 0 16px 30px rgba(56, 189, 248, 0.35);
+	transition: transform 150ms ease, box-shadow 150ms ease;
+	margin-top: 0.6rem;
+}
+
+.auth-button:hover {
+	transform: translateY(-2px);
+	box-shadow: 0 20px 40px rgba(37, 99, 235, 0.4);
+}
+
+.auth-footer {
+	display: flex;
+	justify-content: center;
+	gap: 0.4rem;
+	margin-top: 1.4rem;
+	color: rgba(226, 232, 240, 0.7);
+}
+
+.auth-link {
+	color: #7dd3fc;
+	font-weight: 600;
+	text-decoration: none;
+}
+
+.auth-link:hover {
+	color: #38bdf8;
+	text-decoration: underline;
+}
+
+.auth-alert {
+	margin: 1rem 0 0;
+	padding: 0.75rem 1rem;
+	border-radius: 12px;
+	background: rgba(248, 113, 113, 0.15);
+	border: 1px solid rgba(248, 113, 113, 0.4);
+	color: #fecaca;
+	text-align: center;
+	font-weight: 600;
+}
+
+.auth-success {
+	margin: 1rem 0 0;
+	padding: 0.75rem 1rem;
+	border-radius: 12px;
+	background: rgba(74, 222, 128, 0.15);
+	border: 1px solid rgba(74, 222, 128, 0.4);
+	color: #bbf7d0;
+	text-align: center;
+	font-weight: 600;
+}
+
+:root {
+	--review-ink: #0b1220;
+	--review-muted: #64748b;
+	--review-border: #e2e8f0;
+	--review-surface: #ffffff;
+	--review-surface-alt: #f8fafc;
+	--review-accent: #2563eb;
+	--review-accent-soft: rgba(37, 99, 235, 0.12);
+	--review-glow: rgba(37, 99, 235, 0.18);
 }
 
 .chess-board {
@@ -32,21 +171,31 @@ body {
 }
 
 .viewer-container {
-	display: flex;
+	display: grid;
+	grid-template-columns: minmax(260px, 1fr) minmax(300px, 1fr);
 	gap: 20px;
-	align-items: flex-start;
+	align-items: start;
 }
 
 .board-container {
 	flex: 1;
 	display: flex;
-	justify-content: center;
+	flex-direction: column;
+	gap: 16px;
+	justify-content: flex-start;
+	align-items: center;
+	min-width: 0;
+}
+
+.board-container > * {
+	width: 100%;
+	max-width: 420px;
 }
 
 .info-container {
 	flex: 1;
-	display: flex;
-	flex-direction: column;
+	display: grid;
+	grid-template-columns: 1fr;
 	gap: 12px;
 	min-width: 0;
 }
@@ -57,19 +206,207 @@ body {
 	padding-right: 4px;
 }
 
+.moves-list ol {
+	padding-left: 1.25rem;
+	margin-bottom: 0;
+}
+
+.moves-list li {
+	padding: 4px 0;
+}
+
+.moves-list .btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	text-align: left;
+}
+
+.moves-list .badge {
+	font-size: 0.7rem;
+}
+
+.moves-list .text-muted.small {
+	font-size: 0.72rem;
+}
+
 .graph {
 	width: 100%;
 	height: 240px;
 	min-height: 240px;
 }
 
+.game-viewer-modal .modal-dialog {
+	max-width: 1100px;
+}
+
+.game-viewer-card {
+	border: 1px solid var(--review-border);
+	border-radius: 20px;
+	background: radial-gradient(circle at top left, rgba(37, 99, 235, 0.08), transparent 45%),
+		linear-gradient(145deg, #ffffff, #f1f5f9);
+	box-shadow: 0 28px 70px rgba(15, 23, 42, 0.25);
+	overflow: hidden;
+}
+
+.game-viewer-header {
+	border-bottom: 1px solid var(--review-border);
+	background: linear-gradient(120deg, rgba(37, 99, 235, 0.12), rgba(14, 116, 144, 0.08));
+	color: var(--review-ink);
+}
+
+.game-viewer-title {
+	font-size: 1.2rem;
+	font-weight: 700;
+	color: var(--review-ink);
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+}
+
+.game-viewer-subtitle {
+	font-size: 0.95rem;
+	color: var(--review-muted);
+}
+
+.game-viewer-body {
+	background: var(--review-surface-alt);
+}
+
+.analyzing-progress {
+	background: rgba(226, 232, 240, 0.2);
+	border-radius: 999px;
+	overflow: hidden;
+	box-shadow: 0 12px 30px rgba(14, 165, 233, 0.2);
+}
+
+.analyzing-progress-bar {
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	background: linear-gradient(120deg, #38bdf8, #2563eb, #22d3ee);
+	background-size: 200% 200%;
+	animation: analyzingShimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes analyzingShimmer {
+	0% {
+		background-position: 0% 50%;
+	}
+	50% {
+		background-position: 100% 50%;
+	}
+	100% {
+		background-position: 0% 50%;
+	}
+}
+
+@media (max-width: 992px) {
+	.viewer-container {
+		grid-template-columns: 1fr;
+		gap: 16px;
+	}
+
+	.game-viewer-modal .modal-dialog {
+		max-width: 95vw;
+	}
+}
+
+.game-viewer-board {
+	border-radius: 18px;
+	overflow: hidden;
+	border: 1px solid rgba(15, 23, 42, 0.12);
+	box-shadow: 0 18px 40px rgba(15, 23, 42, 0.14);
+}
+
+.game-info {
+	background: var(--review-surface);
+	border-radius: 14px;
+	padding: 14px 16px;
+	border: 1px solid var(--review-border);
+	color: var(--review-ink);
+	box-shadow: 0 12px 24px rgba(15, 23, 42, 0.08);
+}
+
+.game-info-row {
+	display: flex;
+	justify-content: space-between;
+	font-size: 0.92rem;
+	color: var(--review-muted);
+	padding: 6px 0;
+}
+
+.ai-summary {
+	background: linear-gradient(160deg, #0f172a, #1e293b);
+	color: #e2e8f0;
+	border-radius: 16px;
+	padding: 16px;
+	box-shadow: 0 18px 35px rgba(15, 23, 42, 0.25);
+}
+
+.ai-summary-title {
+	font-weight: 700;
+	margin-bottom: 10px;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+}
+
+.ai-summary-message {
+	margin-bottom: 8px;
+}
+
+.ai-summary-text {
+	font-size: 0.92rem;
+}
+
+.ai-summary-list {
+	margin: 8px 0 0;
+	padding-left: 1.1rem;
+	font-size: 0.85rem;
+}
+
+.ai-summary-warning {
+	color: #fef08a;
+	font-size: 0.85rem;
+}
+
+.ai-summary-muted {
+	color: #94a3b8;
+	font-size: 0.85rem;
+}
+
+.review-summary {
+	background: var(--review-surface);
+	border-radius: 16px;
+	padding: 16px;
+	border: 1px solid var(--review-border);
+	color: var(--review-ink);
+	box-shadow: 0 14px 28px rgba(15, 23, 42, 0.08);
+}
+
+.review-summary-title {
+	font-weight: 700;
+	margin-bottom: 10px;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+}
+
+.review-summary-warning {
+	color: #b45309;
+	font-size: 0.85rem;
+	margin-bottom: 8px;
+}
+
 @media (max-width: 768px) {
 	.viewer-container {
-		flex-direction: column;
-		align-items: center;
+		grid-template-columns: 1fr;
+		justify-items: center;
 	}
 
 	.info-container {
+		width: 100%;
+	}
+
+	.board-container {
 		width: 100%;
 	}
 
@@ -80,6 +417,33 @@ body {
 	.graph {
 		height: 200px;
 		min-height: 200px;
+	}
+
+	.moves-list {
+		max-height: 180px;
+	}
+}
+
+@media (max-width: 576px) {
+	.game-viewer-modal .modal-dialog {
+		margin: 0.5rem;
+	}
+
+	.game-viewer-card {
+		border-radius: 14px;
+	}
+
+	.game-info {
+		padding: 10px 12px;
+	}
+
+	.ai-summary,
+	.review-summary {
+		padding: 12px;
+	}
+
+	.moves-list {
+		max-height: 160px;
 	}
 }
 

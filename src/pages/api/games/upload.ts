@@ -44,6 +44,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       result: meta.result,
       date: meta.date ? new Date(meta.date) : new Date(),
       opponent: meta.opponent,
+      whitePlayer: meta.whitePlayer || undefined,
+      blackPlayer: meta.blackPlayer || undefined,
       opening: detectedOpening !== 'Unknown Opening' ? detectedOpening : undefined,
       analysisStatus: 'pending',
       analysisComplete: false,

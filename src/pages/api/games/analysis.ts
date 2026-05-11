@@ -3,6 +3,7 @@ import clientPromise from '@/lib/mongodb';
 import { requireAuth } from '@/lib/sessionUtils';
 import { ObjectId } from 'mongodb';
 import { getAIReview, getMoveExplanation } from '@/lib/aiReview';
+import { analyzePGNAndSave } from '@/lib/stockfishAnalysis';
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET' && req.method !== 'POST') {
@@ -54,7 +55,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       });
     }
 
-    const { analysis, analysisStatus, analysisError, generateAi, forceAi, useStoredAnalysis } = req.body || {};
+    const {
+      analysis,
+      analysisStatus,
+      analysisError,
+      generateAi,
+      forceAi,
+      useStoredAnalysis,
+      runServerAnalysis,
+      pgn,
+    } = req.body || {};
 
     if (analysisStatus === 'failed') {
       await db.collection('games').updateOne(
@@ -72,6 +82,55 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     }
 
     let analysisPayload = analysis as Record<string, unknown> | undefined;
+
+    if (runServerAnalysis || typeof pgn === 'string') {
+      const game = await db.collection('games').findOne(
+        { _id: new ObjectId(gameId), userId: authResult.userEmail },
+        { projection: { pgn: 1 } }
+      );
+
+      if (!game) {
+        return res.status(404).json({ error: 'Game not found' });
+      }
+
+      const pgnSource = typeof pgn === 'string' ? pgn : game.pgn;
+      if (!pgnSource || typeof pgnSource !== 'string') {
+        return res.status(400).json({ error: 'Missing PGN for analysis' });
+      }
+
+      await db.collection('games').updateOne(
+        { _id: new ObjectId(gameId), userId: authResult.userEmail },
+        {
+          $set: {
+            analysisStatus: 'processing',
+            analysisComplete: false,
+            analysisError: null,
+          },
+        }
+      );
+
+      const serverResult = await analyzePGNAndSave({
+        pgn: pgnSource,
+        userId: authResult.userEmail,
+        gameId,
+      });
+
+      if (!serverResult) {
+        await db.collection('games').updateOne(
+          { _id: new ObjectId(gameId), userId: authResult.userEmail },
+          {
+            $set: {
+              analysisStatus: 'failed',
+              analysisComplete: false,
+              analysisError: 'Server analysis failed. Please retry.',
+            },
+          }
+        );
+        return res.status(500).json({ error: 'Server analysis failed' });
+      }
+
+      analysisPayload = serverResult as Record<string, unknown>;
+    }
 
     if ((!analysisPayload || typeof analysisPayload !== 'object') && useStoredAnalysis) {
       const existingGame = await db.collection('games').findOne(
@@ -116,6 +175,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
               evalAfter: move.evalAfter,
               bestMove: move.bestMove,
               classification: move.classification,
+              brilliant: move.brilliant,
+              brilliantScore: move.brilliantScore,
             });
             return { moveNumber: move.moveNumber, aiComment: explanation };
           })
@@ -154,6 +215,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
           criticalMoves.map((move) => ({
             moveNumber: move.moveNumber,
             classification: move.classification,
+            brilliant: move.brilliant,
+            brilliantScore: move.brilliantScore,
             evalBefore: move.evalBefore,
             evalAfter: move.evalAfter,
             bestMove: move.bestMove,

@@ -5,6 +5,8 @@ export interface Game {
   result: string;
   date: Date;
   opponent: string;
+  whitePlayer?: string;
+  blackPlayer?: string;
   opening?: string;
   analysisId?: string;
   analysis?: {
@@ -28,6 +30,8 @@ export interface Game {
       evalDrop: number;
       side: 'white' | 'black';
       phase: 'opening' | 'middlegame' | 'endgame';
+      brilliant?: boolean;
+      brilliantScore?: number;
       comment: string;
       aiComment?: string;
     }[];
@@ -78,8 +82,13 @@ export interface Game {
         bestMove: string;
         classification: 'brilliant' | 'great' | 'best' | 'excellent' | 'good' | 'inaccuracy' | 'mistake' | 'miss' | 'blunder';
         evalDrop: number;
+        moveAccuracy: number;
+        shortHint: string;
+        longHint: string;
         side: 'white' | 'black';
         phase: 'opening' | 'middlegame' | 'endgame';
+        brilliant?: boolean;
+        brilliantScore?: number;
         comment: string;
         aiComment?: string;
       }[];

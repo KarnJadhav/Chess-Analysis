@@ -26,22 +26,25 @@ export default function SignIn({ csrfToken }: { csrfToken: string }) {
   }
 
   return (
-    <div className="container-fluid min-vh-100 d-flex align-items-center justify-content-center bg-light">
-      <form className="bg-white rounded-4 shadow-lg p-4 p-md-5 w-100" style={{ maxWidth: 400 }} method="post" onSubmit={handleSubmit}>
+    <div className="auth-shell">
+      <form className="auth-card" style={{ maxWidth: 420 }} method="post" onSubmit={handleSubmit}>
         <input name="csrfToken" type="hidden" defaultValue={csrfToken} />
-  <h2 className="fw-bold mb-4 text-center text-primary">Sign In</h2>
-        {error && <div className="alert alert-danger text-center fw-semibold">{error}</div>}
-        <div className="mb-3">
-          <label className="form-label fw-semibold">Email</label>
-          <input className="form-control" type="email" value={email} onChange={e => setEmail(e.target.value)} required />
+        <div className="auth-brand">Chanakya</div>
+        <h2 className="auth-title">Welcome back</h2>
+        <p className="auth-subtitle">Sign in to review your latest games and insights.</p>
+        {error && <div className="auth-alert">{error}</div>}
+        <div className="auth-field">
+          <label className="auth-label">Email</label>
+          <input className="auth-input" type="email" value={email} onChange={e => setEmail(e.target.value)} required />
         </div>
-        <div className="mb-4">
-          <label className="form-label fw-semibold">Password</label>
-          <input className="form-control" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
+        <div className="auth-field">
+          <label className="auth-label">Password</label>
+          <input className="auth-input" type="password" value={password} onChange={e => setPassword(e.target.value)} required />
         </div>
-        <button className="btn btn-primary w-100 py-2 mb-3 fw-bold" type="submit">Sign In</button>
-        <div className="text-center">
-          <Link href="/auth/signup" className="text-secondary text-decoration-underline">Don&apos;t have an account? Sign Up</Link>
+        <button className="auth-button" type="submit">Sign In</button>
+        <div className="auth-footer">
+          <span>Don&apos;t have an account?</span>
+          <Link href="/auth/signup" className="auth-link">Sign Up</Link>
         </div>
       </form>
     </div>

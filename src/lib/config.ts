@@ -9,6 +9,11 @@ export const config = {
     // mode: 'native' | 'wasm'
     mode: process.env.STOCKFISH_MODE || process.env.NEXT_PUBLIC_STOCKFISH_MODE || 'native',
     depth: parseInt(process.env.STOCKFISH_DEPTH || '15', 10),
+    multiPv: parseInt(process.env.STOCKFISH_MULTIPV || '3', 10),
+    surpriseDepths: (process.env.STOCKFISH_SURPRISE_DEPTHS || '10,18')
+      .split(',')
+      .map((value) => parseInt(value.trim(), 10))
+      .filter((value) => Number.isFinite(value) && value > 0),
     timeout: parseInt(process.env.STOCKFISH_TIMEOUT || '10000', 10), // 10 seconds
   },
 
